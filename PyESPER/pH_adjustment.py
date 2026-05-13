@@ -98,9 +98,11 @@ def pH_adjustment(
                     AAdata, Elsedata = input_AAinds(C, code)
                     Gdf, CsDesired = coefs_AAinds(eq, LIR_data)
                     aaLCs, aaInterpolants_pre, elLCs, elInterpolants_pre = interpolate(
+                        Path,
                         Gdf,  
                         AAdata,
-                        Elsedata
+                        Elsedata,
+                        verbose=False
                     )
                     alkest, _ = organize_data(
                         aaLCs,

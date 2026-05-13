@@ -47,7 +47,7 @@ def lir(
     tic = time.perf_counter()
 
     # Providing custom error messages for erroneous input
-    errors(OutputCoordinates, PredictorMeasurements, verbose=verbose)
+    errors(OutputCoordinates, PredictorMeasurements)
 
     # Setting defaults for various input parameters, including defining kwargs and
     # ensuring that coordinates use the correct format

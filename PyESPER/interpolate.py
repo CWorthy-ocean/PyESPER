@@ -25,6 +25,7 @@ def interpolate(Path, Gdf={}, AAdata={}, Elsedata={}, verbose=False):
     Gvalues = list(Gdf.values())
     grid = Gvalues[0]
 
+    print(grid.keys())
     lon_array = np.asarray(grid["lon"], dtype=np.float64) % 360.0
     lat_array = np.asarray(grid["lat"], dtype=np.float64)
     grid_points = np.column_stack((lon_array, lat_array))

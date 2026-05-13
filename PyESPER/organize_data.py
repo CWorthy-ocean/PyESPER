@@ -126,7 +126,9 @@ def organize_data(
         aa_d = AAdata[key]
         el_d = Elsedata[key]
         for k in ["Estimate", "C0", "CS", "CT", "CA", "CB", "CC", "Order"]:
-            merged[k] = np.concatenate([aa_d[k], el_d[k]])
+            aa_val = aa_d.get(k, np.array([]))
+            el_val = el_d.get(k, np.array([]))
+            merged[k] = np.concatenate([aa_val, el_val])
 
         idx = np.argsort(merged["Order"])
         Estimate[key] = merged["Estimate"][idx]
