@@ -10,7 +10,7 @@ from scipy.io import savemat
 
 # Create the data
 data = glodap.world() # version 2.2023
-L = slice(0, 10000) # first 10,000 data points
+L = slice(0, 1000) # first 10,000 data points
 
 # Create the dictionary of predictors
 PredictorMeasurements = {
@@ -48,7 +48,7 @@ Path = ""  # home directory
 # %% Now try PyESPERs LIR
              
 EstimatesLIR, CoefficientsLIR, UncertaintiesLIR = lir(
-    ['TA'], 
+    ['oxygen'], 
     Path, 
     OutputCoordinates, 
     PredictorMeasurements, 
@@ -57,15 +57,15 @@ EstimatesLIR, CoefficientsLIR, UncertaintiesLIR = lir(
 
 # DEBUG, unhash as needed
 print('LIR Estimates are:')
-print(EstimatesLIR['TA1'][300:310]) 
+print(EstimatesLIR['oxygen1'][300:310]) 
 print('LIR Coefficient A estimates are:')
-print(CoefficientsLIR['TA1']['Coef A'][5:10])
+print(CoefficientsLIR['oxygen1']['Coef A'][5:10])
 print('LIR uncertainties are:')
-print(UncertaintiesLIR['TA1'][308:310])
+print(UncertaintiesLIR['oxygen1'][308:310])
 # %% NN
 
 EstimatesNN, UncertaintiesNN = nn(
-    ['TA'], 
+    ['oxygen'], 
     Path, 
     OutputCoordinates, 
     PredictorMeasurements, 
@@ -74,13 +74,13 @@ EstimatesNN, UncertaintiesNN = nn(
 
 # DEBUG, unhash as needed
 print('NN Estimates are:')
-print(EstimatesNN['TA10'][300:310]) 
+print(EstimatesNN['oxygen10'][300:310]) 
 print('NN uncertainties are:')
-print(UncertaintiesNN['TA10'][308:310])
+print(UncertaintiesNN['oxygen10'][308:310])
 # %% Mixed
 
 EstimatesMixed, UncertaintiesMixed = mixed(
-    ['TA'], 
+    ['oxygen'], 
     Path,
     OutputCoordinates, 
     PredictorMeasurements,
@@ -89,13 +89,13 @@ EstimatesMixed, UncertaintiesMixed = mixed(
 
 # DEBUG, unhash as needed
 print('Mixed Estimates are:')
-print(EstimatesMixed['TA3'][300:310]) 
+print(EstimatesMixed['oxygen3'][300:310]) 
 print('Mixed uncertainties are:')
-print(UncertaintiesMixed['TA3'][308:310])
+print(UncertaintiesMixed['oxygen3'][308:310])
 # %% Save
 
 savemat(
-    "validation_review_sandborn_TA.mat",
+    "validation_review_sandborn_oxygen.mat",
     {
         "Estimates_LIR": EstimatesLIR,
         "Estimates_NN": EstimatesNN,
