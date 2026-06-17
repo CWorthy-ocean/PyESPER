@@ -55,7 +55,7 @@ def pH_DIC_nn_adjustment(Path, DesiredVariables, Estimates, YouHaveBeenWarnedCan
             longitude = np.mod(OutputCoordinates["longitude"], 360)
             latitude = np.array(OutputCoordinates["latitude"])
             depth = np.array(OutputCoordinates["depth"])
-            Cant, Cant2002 = simplecantestimatelr(EstDates, longitude, latitude, depth)
+            Cant, Cant2002 = simplecantestimatelr(EstDates, longitude, latitude, depth, Path)
             YouHaveBeenWarnedCanth = True
     
         for combo, a in zip(combos2, values2):

@@ -1,9 +1,10 @@
-def defaults (DesiredVariables, PredictorMeasurements={}, OutputCoordinates={}, **kwargs):
-
+def defaults(
+    DesiredVariables, PredictorMeasurements={}, OutputCoordinates={}, **kwargs
+):
     """
     Set default values and bookkeep inputs.
 
-    Inputs: 
+    Inputs:
         DesiredVariables: List of desired output variables (user-requested)
         PredictorMeasurements: Dictionary of user-provided predictor mesasurements (salinity, etc.)
         OutputCoordinates: Dictionary of user-provided coordinates
@@ -17,21 +18,21 @@ def defaults (DesiredVariables, PredictorMeasurements={}, OutputCoordinates={}, 
         VerboseTF: Boolean read-in of whether user wants to suppress optional warnings
         C: Dictionary of processed geographic coordinates
         PerKgSwTF: Boolean representing whether user input is in molal or molar units
-        MeasUncerts: Dictionary of user input measurement uncertainty values or empty 
-            dictionary if not provided   
+        MeasUncerts: Dictionary of user input measurement uncertainty values or empty
+            dictionary if not provided
     """
 
     import numpy as np
 
     # Check and define Equations based on user-defined kwargs, or use default values
     Equations = kwargs.get("Equations", list(range(1, 17)))
-    
+
     # Reading dimensions of user input
-    n = max(len(v) for v in OutputCoordinates.values()) 
-                
+    n = max(len(v) for v in OutputCoordinates.values())
+
     # Checking kwargs for presence of VerboseTF and EstDates, and Equations, and defining defaults, as needed
-    VerboseTF = kwargs.get("VerboseTF", True)
-        
+    verbose = kwargs.get("verbose", True)
+
     # Set EstDates based on kwargs, defaulting to 2002.0 if not provided
     if "EstDates" in kwargs:
         d = np.array(kwargs["EstDates"])
@@ -41,16 +42,16 @@ def defaults (DesiredVariables, PredictorMeasurements={}, OutputCoordinates={}, 
             EstDates = d
     else:
         EstDates = np.full(n, 2002.0)
-        
+
     # Bookkeeping coordinates
     C = {}
     longitude = np.array(OutputCoordinates["longitude"])
     longitude[longitude > 360] = np.remainder(longitude[longitude > 360], 360)
-    longitude[longitude < 0] = longitude[longitude<0] + 360
+    longitude[longitude < 0] = longitude[longitude < 0] + 360
     C["longitude"] = longitude
     C["latitude"] = OutputCoordinates["latitude"]
-    C["depth"] = OutputCoordinates["depth"]   
-    
+    C["depth"] = OutputCoordinates["depth"]
+
     # Defining or reading in PerKgSwTF
     PerKgSwTF = kwargs.get("PerKgSwTF", True)
 
@@ -66,6 +67,8 @@ def defaults (DesiredVariables, PredictorMeasurements={}, OutputCoordinates={}, 
                     "PredictorMeasurements has columns, or a matrix of identical dimension to PredictorMeasurements."
                 )
         if len(MeasUncerts) != len(PredictorMeasurements):
-            print("Warning: Different numbers of input uncertainties and input measurements.")
+            print(
+                "Warning: Different numbers of input uncertainties and input measurements."
+            )
 
-    return Equations, n, VerboseTF, EstDates, C, PerKgSwTF, MeasUncerts
+    return Equations, n, verbose, EstDates, C, PerKgSwTF, MeasUncerts

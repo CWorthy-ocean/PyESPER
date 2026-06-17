@@ -10,7 +10,7 @@ from scipy.io import savemat
 
 # Create the data
 data = glodap.world() # version 2.2023
-L = slice(0, 1000) # first 1000 data points
+L = slice(0, 1000) # first 10,000 data points
 
 # Create the dictionary of predictors
 PredictorMeasurements = {
@@ -57,7 +57,7 @@ EstimatesLIR, CoefficientsLIR, UncertaintiesLIR = lir(
 
 # DEBUG, unhash as needed
 print('LIR Estimates are:')
-print(EstimatesLIR['oxygen1'][700:710]) 
+print(EstimatesLIR['oxygen1'][300:310]) 
 print('LIR Coefficient A estimates are:')
 print(CoefficientsLIR['oxygen1']['Coef A'][5:10])
 print('LIR uncertainties are:')
@@ -76,7 +76,7 @@ EstimatesNN, UncertaintiesNN = nn(
 print('NN Estimates are:')
 print(EstimatesNN['oxygen10'][300:310]) 
 print('NN uncertainties are:')
-print(UncertaintiesNN['oxygen10'][508:510])
+print(UncertaintiesNN['oxygen10'][308:310])
 # %% Mixed
 
 EstimatesMixed, UncertaintiesMixed = mixed(
@@ -89,13 +89,13 @@ EstimatesMixed, UncertaintiesMixed = mixed(
 
 # DEBUG, unhash as needed
 print('Mixed Estimates are:')
-print(EstimatesMixed['oxygen3'][980:990]) 
+print(EstimatesMixed['oxygen3'][300:310]) 
 print('Mixed uncertainties are:')
-print(UncertaintiesMixed['oxygen3'][712:715])
+print(UncertaintiesMixed['oxygen3'][308:310])
 # %% Save
 
 savemat(
-    "validation_review_main_oxygen.mat",
+    "validation_review_sandborn_oxygen.mat",
     {
         "Estimates_LIR": EstimatesLIR,
         "Estimates_NN": EstimatesNN,

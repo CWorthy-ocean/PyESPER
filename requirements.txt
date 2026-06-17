@@ -1,0 +1,8 @@
+numpy
+#seawater #replaced by Numba NJIT functions
+scipy
+matplotlib
+kiwisolver
+PyCO2SYS
+pandas
+numba
