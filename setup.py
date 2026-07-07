@@ -5,11 +5,14 @@ with open("README.md", "r") as f:
 
 setup(
     name="PyESPER",
-    version="1.0.1",
+    version="1.1.1",
     description="Python version of ESPERv1",
     author="LMD",
     author_email="lmdias@uw.edu",
     packages=["PyESPER"],
+    package_data={
+        "PyESPER": ["*.csv"],
+    },
     install_requires=[
         "numpy",
         # "seawater",
