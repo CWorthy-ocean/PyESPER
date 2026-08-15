@@ -54,6 +54,11 @@ def lir(
     Equations, n, verbose, EstDates, C, PerKgSwTF, MeasUncerts = defaults(
         DesiredVariables, PredictorMeasurements, OutputCoordinates, **kwargs
     )
+    # ``verbose`` is already captured above; drop it from kwargs so the downstream
+    # calls that take it positionally (e.g. adjust_pH_DIC) don't also receive it via
+    # **kwargs. Capture our own estimate-only flag as a local for the same reason.
+    kwargs.pop("verbose", None)
+    compute_uncertainties = kwargs.pop("compute_uncertainties", True)
 
     # Processing the input values (Uncertainties_pre) and calculating default
     # measurement uncertainties
@@ -110,18 +115,24 @@ def lir(
         Elsedata,
     )
 
-    # Calculate initial uncertainties for lirs
-    Uncertainties = emlr_estimate(
-        Equations,
-        DesiredVariables,
-        Path,
-        OutputCoordinates,
-        PredictorMeasurements,
-        unc_combo_dict,
-        dunc_combo_dict,
-        Coefficients=CoefficientsUsed,
-        verbose=verbose,
-    )
+    # Calculate initial uncertainties for lirs.
+    # ``compute_uncertainties=False`` skips this (it re-loads the ~300 MB LIR grids and
+    # runs the Numba uncertainty kernel); estimates do not depend on it, so gridded/dask
+    # callers that only need estimates turn it off.
+    if compute_uncertainties:
+        Uncertainties = emlr_estimate(
+            Equations,
+            DesiredVariables,
+            Path,
+            OutputCoordinates,
+            PredictorMeasurements,
+            unc_combo_dict,
+            dunc_combo_dict,
+            Coefficients=CoefficientsUsed,
+            verbose=verbose,
+        )
+    else:
+        Uncertainties = None
 
     # First of three steps to adjust pH and DIC for
     # anthropogenic carbon, as needed
