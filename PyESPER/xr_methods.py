@@ -11,6 +11,20 @@ natural fit for :func:`xarray.apply_ufunc` with ``dask="parallelized"`` -- dask 
 the kernel on one chunk at a time, so peak memory is bounded by the chunk size (not the
 whole domain or the number of time records), and independent chunks run in parallel.
 
+**"Bounded by the chunk size" assumes the chunks are actually small** -- ``run_nets``'s
+own memory cost is roughly 10 KB *per point* (empirically measured; dominated by
+``batched_forward`` holding a ``(G stacked nets, hidden width, Q points)`` activation
+array -- e.g. 12 nets x ~40 hidden units x Q points x 8 bytes, times ~2 for the
+``tansig`` output buffer alongside its input), not the few bytes per point a caller
+would expect from the *input* arrays' own dtype. A caller's existing dask chunking
+(e.g. a physics grid regridded with the entire vertical dimension in one chunk) can
+easily produce chunks of tens of millions of points -- fine for a plain regrid, but
+enough to demand 100+ GB for a single ``run_nets`` call. This module defensively
+rechunks to :data:`_MAX_POINTS_PER_CHUNK` before dispatching, independent of whatever
+chunking the caller's arrays already carry -- this is not a hypothetical: an
+unchunked-enough 4 km / 100-level production grid OOM-killed a 251 GB machine twice at
+the default chunking before this fix.
+
 Public functions
 ----------------
 ``lir_xr`` / ``nn_xr`` / ``mixed_xr`` accept :class:`xarray.DataArray` inputs and return a
@@ -41,6 +55,16 @@ VALID_VARIABLES = ("TA", "DIC", "pH", "phosphate", "nitrate", "silicate", "oxyge
 # i.e. Equation 8 (S, T) or 16 (S). Extending to nutrient/oxygen predictors would mean
 # threading those DataArrays through as additional PredictorMeasurements.
 _METHODS = {"lir", "nn", "mixed"}
+
+# Safe upper bound on points-per-dask-chunk for the run_nets path (see module
+# docstring for the ~10 KB/point measurement this is based on). 200_000 points
+# -> ~2 GB peak per chunk (measured), so even cstar-forge's default 8 concurrent
+# dask workers stays around ~16-20 GB peak for this step -- safe on a modest
+# workstation, not just a large server. Deliberately conservative: the fixed
+# per-chunk overhead (defaults/iterations/polygon lookup, ~0.3-0.5s) is a small
+# fraction of run_nets' own per-chunk time at this size, so this does not turn
+# into a chunk-count/overhead problem in the other direction.
+_MAX_POINTS_PER_CHUNK = 200_000
 
 
 def _method_fn(method):
@@ -161,6 +185,26 @@ def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
     sal, temp, lon, lat, dep, dates = xr.broadcast(
         salinity, temperature, longitude, latitude, depth, est_dates
     )
+
+    # Defensively rechunk to a safe points-per-chunk budget before dispatching to
+    # run_nets, regardless of whatever chunking the broadcast inputs already carry
+    # (see module docstring: "bounded by the chunk size" only holds if the chunks
+    # are actually small, and a caller's own chunking was never chosen with
+    # run_nets' per-point cost in mind).
+    if sal.chunks is not None:
+        from dask.array.core import normalize_chunks
+
+        target_chunks = normalize_chunks(
+            "auto",
+            shape=sal.shape,
+            limit=_MAX_POINTS_PER_CHUNK * 8,  # bytes-equivalent at 8 B/element
+            dtype=np.dtype("float64"),
+            previous_chunks=sal.chunks,
+        )
+        rechunk_kwargs = dict(zip(sal.dims, target_chunks, strict=True))
+        sal, temp, lon, lat, dep, dates = (
+            arr.chunk(rechunk_kwargs) for arr in (sal, temp, lon, lat, dep, dates)
+        )
 
     results = xr.apply_ufunc(
         _estimate_block,
