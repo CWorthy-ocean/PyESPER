@@ -9,7 +9,12 @@ Seawater property estimation is **point-independent**: each location's estimate 
 only on its own longitude/latitude/depth/salinity/temperature(/date). That makes it a
 natural fit for :func:`xarray.apply_ufunc` with ``dask="parallelized"`` -- dask invokes
 the kernel on one chunk at a time, so peak memory is bounded by the chunk size (not the
-whole domain or the number of time records), and independent chunks run in parallel.
+whole domain or the number of time records). **Chunks must NOT be computed
+concurrently with each other, though** -- see the neural-net thread-safety note below --
+so unlike a typical dask array, "peak memory bounded by chunk size" is this module's
+only real parallelism lever: make each chunk as large as memory affords (see
+:data:`_MAX_POINTS_PER_CHUNK`) rather than relying on many small chunks running at once,
+since they never do.
 
 **"Bounded by the chunk size" assumes the chunks are actually small** -- ``run_nets``'s
 own memory cost is roughly 10 KB *per point* (empirically measured; dominated by
@@ -23,7 +28,11 @@ enough to demand 100+ GB for a single ``run_nets`` call. This module defensively
 rechunks to :data:`_MAX_POINTS_PER_CHUNK` before dispatching, independent of whatever
 chunking the caller's arrays already carry -- this is not a hypothetical: an
 unchunked-enough 4 km / 100-level production grid OOM-killed a 251 GB machine twice at
-the default chunking before this fix.
+the default chunking before this fix. :data:`_MAX_POINTS_PER_CHUNK` only has to bound
+*one* chunk's memory now (see the thread-safety note below -- callers run chunks one at
+a time, never several concurrently), not several concurrent workers' worth at once, so
+it can be sized against the whole machine's memory rather than divided by a worker
+count.
 
 Public functions
 ----------------
@@ -37,10 +46,17 @@ Notes
 -----
 * NaN inputs (e.g. land cells on a model grid) are handled: non-finite points are skipped
   and returned as NaN, so the underlying routines only ever see valid points.
-* The neural-net path (``nn_xr``/``mixed_xr``) is safe under a process/synchronous dask
-  scheduler. The reload-based module loading was removed (see ``run_nets._load_net``), so
-  the remaining thread-safety concern is Numba first-compilation; prefer the process or
-  synchronous scheduler, or warm the caches once before fanning out.
+* The neural-net path (``nn_xr``/``mixed_xr``) must not have more than one chunk in
+  flight at once: ``run_nets``' ``_tansig`` kernel is itself a numba
+  ``@njit(parallel=True)`` kernel that claims every core it can see
+  (``numba.get_num_threads()``) *per call*. Several chunks entering it concurrently
+  (dask's default threaded scheduler, several worker threads at once) was observed to
+  reliably deadlock the whole process -- every thread parked in a futex wait, 0% CPU,
+  stuck at a fixed completed-chunk count -- not merely slow. Callers must run this
+  under a process/synchronous dask scheduler (one chunk at a time) so this kernel's own
+  parallelism is the only parallelism in play; see ``roms_tools.setup.esper``'s caller
+  for the concrete fix (forcing ``.compute(scheduler="synchronous")``) and
+  ``run_nets.py``'s ``batched_forward``/``_tansig`` docstrings for the full mechanism.
 """
 
 from __future__ import annotations
@@ -57,14 +73,25 @@ VALID_VARIABLES = ("TA", "DIC", "pH", "phosphate", "nitrate", "silicate", "oxyge
 _METHODS = {"lir", "nn", "mixed"}
 
 # Safe upper bound on points-per-dask-chunk for the run_nets path (see module
-# docstring for the ~10 KB/point measurement this is based on). 200_000 points
-# -> ~2 GB peak per chunk (measured), so even cstar-forge's default 8 concurrent
-# dask workers stays around ~16-20 GB peak for this step -- safe on a modest
-# workstation, not just a large server. Deliberately conservative: the fixed
-# per-chunk overhead (defaults/iterations/polygon lookup, ~0.3-0.5s) is a small
-# fraction of run_nets' own per-chunk time at this size, so this does not turn
-# into a chunk-count/overhead problem in the other direction.
-_MAX_POINTS_PER_CHUNK = 200_000
+# docstring for the ~10 KB/point measurement this is based on, and the
+# neural-net thread-safety note for why chunks run strictly one at a time).
+# Originally 200_000 (-> ~2 GB peak), sized as if up to 8 dask workers might
+# each hold one chunk concurrently (~16-20 GB peak total) -- but concurrent
+# chunks are exactly what must never happen with this kernel (see above), so
+# that multiplication was never actually possible in a correct caller, and the
+# 200_000 cap paid for a safety margin against a scenario that can't occur
+# while being real-world *harmful* in the other direction: at production grid
+# scale, dask's "auto" rechunking fragments this budget across every array
+# dimension it can, not just one -- e.g. a 90M-point domain fragments into
+# ~768 chunks (not the ~450 a naive divide would suggest) at 200_000, each
+# paying run_nets' fixed per-chunk overhead (defaults/iterations/polygon
+# lookup) independently. Raised to bound one chunk against the whole
+# machine's memory instead (still comfortably peak-bounded: 6_000_000 points
+# -> ~60 GB, safe on a 256+ GB node with chunks processed strictly serially --
+# lower this if run on a smaller machine). At this cap the same 90M-point
+# domain lands on ~16 chunks instead of ~768, a ~48x cut in fixed per-chunk
+# overhead and neural-net invocation count for the exact same total work.
+_MAX_POINTS_PER_CHUNK = 6_000_000
 
 
 def _method_fn(method):
