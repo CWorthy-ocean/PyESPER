@@ -181,7 +181,7 @@ def test_kernel_lock_restores_the_callers_thread_count(monkeypatch):
 
 
 @pytest.mark.slow
-def test_nn_xr_completes_under_dasks_threaded_scheduler(monkeypatch):
+def test_nn_xr_completes_under_dasks_threaded_scheduler():
     """The end-to-end consequence: a multi-chunk NN estimate completes and is correct.
 
     Before ``kernel_lock``, several chunks entering ``run_nets`` concurrently under
@@ -189,17 +189,14 @@ def test_nn_xr_completes_under_dasks_threaded_scheduler(monkeypatch):
     genuinely multi-chunk problem through that exact scheduler with a wall-clock bound,
     and checks the answer against the same computation done one chunk at a time.
 
-    ``_MAX_POINTS_PER_CHUNK`` is lowered for the duration: at its production value the
-    defensive rechunk in ``_estimate_xr`` would fuse a test-sized grid into a single
-    block, and a single block cannot exercise concurrency at all.
+    ``max_points_per_chunk`` is forced low: at the automatic cap the rechunk in
+    ``_estimate_xr`` would leave a test-sized grid as a single block, and a single block
+    cannot exercise concurrency at all.
     """
     dask = pytest.importorskip("dask")
     xr = pytest.importorskip("xarray")
 
-    from PyESPER import xr_methods
     from PyESPER.xr_methods import nn_xr
-
-    monkeypatch.setattr(xr_methods, "_MAX_POINTS_PER_CHUNK", 64)
 
     rng = np.random.default_rng(0)
     n_z, n_y = 8, 128
@@ -214,7 +211,10 @@ def test_nn_xr_completes_under_dasks_threaded_scheduler(monkeypatch):
     latitude = da(rng.uniform(-70.0, 70.0, (n_z, n_y)))
     depth = da(rng.uniform(0.0, 4000.0, (n_z, n_y)))
 
-    kwargs = dict(variables=["TA", "oxygen"], path="", equation=8, est_dates=2002.0)
+    kwargs = dict(
+        variables=["TA", "oxygen"], path="", equation=8, est_dates=2002.0,
+        max_points_per_chunk=64,
+    )
     lazy = nn_xr(salinity, temperature, longitude, latitude, depth, **kwargs)
     assert all(v.chunks is not None for v in lazy.values()), "results should stay lazy"
     n_blocks = lazy["TA"].data.npartitions

@@ -14,7 +14,7 @@ whole domain or the number of time records). **Chunks are never processed concur
 whatever scheduler the caller happens to use (see the neural-net thread-safety note
 below). So unlike a typical dask array, "peak memory bounded by chunk size" is this
 module's only real parallelism lever: make each chunk as large as memory affords (see
-:data:`_MAX_POINTS_PER_CHUNK`) rather than relying on many small chunks running at once,
+:func:`_max_points_per_chunk`) rather than relying on many small chunks running at once,
 since they never do.
 
 **"Bounded by the chunk size" assumes the chunks are actually small.** This used to be
@@ -28,14 +28,15 @@ against the OOM described below, not because the old per-point cost still applie
 (e.g. a physics grid regridded with the entire vertical dimension in one chunk) can
 easily produce chunks of tens of millions of points -- fine for a plain regrid, but
 enough to demand 100+ GB for a single ``run_nets`` call. This module defensively
-rechunks to :data:`_MAX_POINTS_PER_CHUNK` before dispatching, independent of whatever
-chunking the caller's arrays already carry -- this is not a hypothetical: an
-unchunked-enough 4 km / 100-level production grid OOM-killed a 251 GB machine twice at
-the default chunking before this fix. :data:`_MAX_POINTS_PER_CHUNK` only has to bound
-*one* chunk's memory now (see the thread-safety note below -- callers run chunks one at
-a time, never several concurrently), not several concurrent workers' worth at once, so
-it can be sized against the whole machine's memory rather than divided by a worker
-count.
+caps the points per chunk before dispatching, independent of whatever chunking the
+caller's arrays already carry -- this is not a hypothetical: an unchunked-enough 4 km /
+100-level production grid OOM-killed a 251 GB machine twice at the default chunking
+before this fix. The cap comes from :func:`_max_points_per_chunk`, which divides a memory
+budget by the measured per-point cost of the specific method and variable count
+requested. It only has to bound *one* chunk (see the thread-safety note below -- chunks
+run strictly one at a time), not several concurrent workers' worth, so it is sized
+against the whole process rather than divided by a worker count. Callers who know better
+can override it with ``max_points_per_chunk``.
 
 Public functions
 ----------------
@@ -71,6 +72,8 @@ Notes
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import xarray as xr
 
@@ -84,26 +87,63 @@ VALID_VARIABLES = ("TA", "DIC", "pH", "phosphate", "nitrate", "silicate", "oxyge
 # threading those DataArrays through as additional PredictorMeasurements.
 _METHODS = {"lir", "nn", "mixed"}
 
-# Safe upper bound on points-per-dask-chunk for the run_nets path (see module
-# docstring for the ~10 KB/point measurement this is based on, and the
-# neural-net thread-safety note for why chunks run strictly one at a time).
-# Originally 200_000 (-> ~2 GB peak), sized as if up to 8 dask workers might
-# each hold one chunk concurrently (~16-20 GB peak total) -- but concurrent
-# chunks are exactly what must never happen with this kernel (see above), so
-# that multiplication was never actually possible in a correct caller, and the
-# 200_000 cap paid for a safety margin against a scenario that can't occur
-# while being real-world *harmful* in the other direction: at production grid
-# scale, dask's "auto" rechunking fragments this budget across every array
-# dimension it can, not just one -- e.g. a 90M-point domain fragments into
-# ~768 chunks (not the ~450 a naive divide would suggest) at 200_000, each
-# paying run_nets' fixed per-chunk overhead (defaults/iterations/polygon
-# lookup) independently. Raised to bound one chunk against the whole
-# machine's memory instead (still comfortably peak-bounded: 6_000_000 points
-# -> ~60 GB, safe on a 256+ GB node with chunks processed strictly serially --
-# lower this if run on a smaller machine). At this cap the same 90M-point
-# domain lands on ~16 chunks instead of ~768, a ~48x cut in fixed per-chunk
-# overhead and neural-net invocation count for the exact same total work.
-_MAX_POINTS_PER_CHUNK = 6_000_000
+# Memory budget for one chunk, in bytes. The points-per-chunk cap is derived from this
+# and the measured per-point cost of the requested method and variable count, rather
+# than being a single hard-coded point count -- the per-point cost varies by more than
+# 4x across the supported requests (see _bytes_per_point), so one number is either
+# wasteful for small requests or unsafe for large ones.
+#
+# 24 GiB is deliberately conservative: chunks are processed strictly one at a time (see
+# PyESPER.concurrency), so this bounds the whole process, not a per-worker share. Raise
+# it via PYESPER_CHUNK_MEMORY (bytes) on a large node to cut the number of chunks and
+# with it the fixed per-chunk overhead.
+_DEFAULT_CHUNK_MEMORY = 24 * 1024**3
+
+# Never fragment below this, however tight the budget: each chunk pays a fixed setup
+# cost (defaults/iterations/polygon classification), so very small chunks are pure loss.
+_MIN_POINTS_PER_CHUNK = 250_000
+
+# Measured peak bytes/point for one _estimate_block call on this machine, six variables
+# and one variable, equation 8, fitted as base + per_variable * n_variables:
+#
+#     method   1 variable   6 variables    fit
+#     nn         460 B/pt     1185 B/pt    315 + 145*n
+#     lir        606 B/pt     1968 B/pt    334 + 272*n
+#
+# The constants below round those up with roughly 1.4x headroom, because the fit is from
+# one machine and one equation. `mixed` runs both paths, so it is charged for both.
+_BYTES_PER_POINT = {
+    "nn": (450, 200),
+    "lir": (450, 380),
+    "mixed": (900, 580),
+}
+
+
+def _chunk_memory_budget():
+    """Per-chunk memory budget in bytes, overridable by ``PYESPER_CHUNK_MEMORY``."""
+    raw = os.environ.get("PYESPER_CHUNK_MEMORY", "").strip()
+    if not raw:
+        return _DEFAULT_CHUNK_MEMORY
+    try:
+        value = int(float(raw))
+    except ValueError:
+        raise ValueError(
+            f"PYESPER_CHUNK_MEMORY must be a number of bytes, got {raw!r}."
+        ) from None
+    if value <= 0:
+        raise ValueError(f"PYESPER_CHUNK_MEMORY must be positive, got {value}.")
+    return value
+
+
+def _bytes_per_point(method, n_variables):
+    base, per_variable = _BYTES_PER_POINT[method]
+    return base + per_variable * max(int(n_variables), 1)
+
+
+def _max_points_per_chunk(method, n_variables):
+    """How many points one chunk may hold before it risks the memory budget."""
+    budget = _chunk_memory_budget() // _bytes_per_point(method, n_variables)
+    return max(int(budget), _MIN_POINTS_PER_CHUNK)
 
 
 def _method_fn(method):
@@ -220,7 +260,8 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
 
 
 def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
-                 variables, path, method, equation, est_dates):
+                 variables, path, method, equation, est_dates,
+                 max_points_per_chunk=None):
     """Shared implementation for ``lir_xr``/``nn_xr``/``mixed_xr``."""
     if isinstance(variables, str):
         variables = [variables]
@@ -247,25 +288,40 @@ def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
         salinity, temperature, longitude, latitude, depth, est_dates
     )
 
-    # Defensively rechunk to a safe points-per-chunk budget before dispatching to
-    # run_nets, regardless of whatever chunking the broadcast inputs already carry
-    # (see module docstring: "bounded by the chunk size" only holds if the chunks
-    # are actually small, and a caller's own chunking was never chosen with
-    # run_nets' per-point cost in mind).
+    # Defensively cap the points per chunk before dispatching, regardless of whatever
+    # chunking the broadcast inputs already carry: a caller's chunking is chosen for
+    # regridding and IO, never for this pipeline's per-point cost, and an unbounded
+    # chunk here is a real OOM (it killed a 251 GB machine twice on a 4 km / 100-level
+    # grid). The cap is derived from a memory budget and the measured per-point cost of
+    # this particular request -- see _max_points_per_chunk.
     if sal.chunks is not None:
-        from dask.array.core import normalize_chunks
+        budget_points = (
+            _max_points_per_chunk(method, len(variables))
+            if max_points_per_chunk is None
+            else max(int(max_points_per_chunk), 1)
+        )
+        # Largest block the caller's own chunking would produce. Only shrink: if the
+        # caller already chose something smaller, respect it. Rechunking anyway would
+        # add a graph layer for nothing, and "auto" would happily *grow* their chunks
+        # up to the budget, which is not this function's business.
+        largest_block = 1
+        for per_dim in sal.chunks:
+            largest_block *= max(per_dim)
 
-        target_chunks = normalize_chunks(
-            "auto",
-            shape=sal.shape,
-            limit=_MAX_POINTS_PER_CHUNK * 8,  # bytes-equivalent at 8 B/element
-            dtype=np.dtype("float64"),
-            previous_chunks=sal.chunks,
-        )
-        rechunk_kwargs = dict(zip(sal.dims, target_chunks, strict=True))
-        sal, temp, lon, lat, dep, dates = (
-            arr.chunk(rechunk_kwargs) for arr in (sal, temp, lon, lat, dep, dates)
-        )
+        if largest_block > budget_points:
+            from dask.array.core import normalize_chunks
+
+            target_chunks = normalize_chunks(
+                "auto",
+                shape=sal.shape,
+                limit=budget_points * 8,  # bytes-equivalent at 8 B/element
+                dtype=np.dtype("float64"),
+                previous_chunks=sal.chunks,
+            )
+            rechunk_kwargs = dict(zip(sal.dims, target_chunks, strict=True))
+            sal, temp, lon, lat, dep, dates = (
+                arr.chunk(rechunk_kwargs) for arr in (sal, temp, lon, lat, dep, dates)
+            )
 
     results = xr.apply_ufunc(
         _estimate_block,
@@ -283,7 +339,8 @@ def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
 
 
 def lir_xr(salinity, temperature, longitude, latitude, depth, *,
-           variables, path="", equation=8, est_dates=None):
+           variables, path="", equation=8, est_dates=None,
+           max_points_per_chunk=None):
     """Dask-lazy LIR estimates as xarray DataArrays. See module docstring.
 
     Parameters
@@ -301,6 +358,10 @@ def lir_xr(salinity, temperature, longitude, latitude, depth, *,
         8 (salinity + temperature) or 16 (salinity only).
     est_dates : float or xarray.DataArray, optional
         Decimal year(s); only affects DIC/pH. Defaults to 2002.0.
+    max_points_per_chunk : int, optional
+        Override the automatic points-per-chunk cap. By default it is derived from a
+        24 GiB budget (``PYESPER_CHUNK_MEMORY``) and this request's measured per-point
+        cost. Chunks smaller than the cap are never grown.
 
     Returns
     -------
@@ -310,25 +371,27 @@ def lir_xr(salinity, temperature, longitude, latitude, depth, *,
     return _estimate_xr(
         salinity, temperature, longitude, latitude, depth,
         variables=variables, path=path, method="lir", equation=equation,
-        est_dates=est_dates,
+        est_dates=est_dates, max_points_per_chunk=max_points_per_chunk,
     )
 
 
 def nn_xr(salinity, temperature, longitude, latitude, depth, *,
-          variables, path="", equation=8, est_dates=None):
+          variables, path="", equation=8, est_dates=None,
+          max_points_per_chunk=None):
     """Dask-lazy neural-network estimates as xarray DataArrays. See :func:`lir_xr`."""
     return _estimate_xr(
         salinity, temperature, longitude, latitude, depth,
         variables=variables, path=path, method="nn", equation=equation,
-        est_dates=est_dates,
+        est_dates=est_dates, max_points_per_chunk=max_points_per_chunk,
     )
 
 
 def mixed_xr(salinity, temperature, longitude, latitude, depth, *,
-             variables, path="", equation=8, est_dates=None):
+             variables, path="", equation=8, est_dates=None,
+             max_points_per_chunk=None):
     """Dask-lazy LIR+NN ensemble-mean estimates as xarray DataArrays. See :func:`lir_xr`."""
     return _estimate_xr(
         salinity, temperature, longitude, latitude, depth,
         variables=variables, path=path, method="mixed", equation=equation,
-        est_dates=est_dates,
+        est_dates=est_dates, max_points_per_chunk=max_points_per_chunk,
     )
