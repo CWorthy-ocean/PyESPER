@@ -189,17 +189,23 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
     # estimation call would leave every waiting worker holding a full set of
     # point-length Python lists.
     with kernel_lock():
+        # numpy arrays, not Python lists. The estimation routines accept either --
+        # everything downstream immediately calls np.array/np.asarray on these -- but a
+        # list of n Python floats costs ~40 bytes/point against 8, and building six of
+        # them (then converting them straight back) was a measurable share of each
+        # chunk. `defaults()` copies longitude before modifying it, so passing borrowed
+        # arrays here does not mutate the caller's data.
         coords = {
-            "longitude": lon_f[idx].tolist(),
-            "latitude": lat_f[idx].tolist(),
-            "depth": depth_f[idx].tolist(),
+            "longitude": lon_f[idx],
+            "latitude": lat_f[idx],
+            "depth": depth_f[idx],
         }
         preds = {
-            "salinity": sal_f[idx].tolist(),
-            "temperature": temp_f[idx].tolist(),
+            "salinity": sal_f[idx],
+            "temperature": temp_f[idx],
         }
         est = _method_fn(method)(
-            list(variables), path, coords, preds, dates_f[idx].tolist(), equation
+            list(variables), path, coords, preds, dates_f[idx], equation
         )
         del coords, preds
 

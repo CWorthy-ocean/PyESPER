@@ -105,3 +105,41 @@ def test_numpy_backed_inputs_are_unaffected():
         )
 
     assert not hasattr(out["nitrate"].data, "dask")
+
+
+def test_estimate_block_does_not_mutate_caller_arrays():
+    """``_estimate_block`` passes borrowed numpy arrays into the estimation routines.
+
+    That is only safe because ``defaults()`` copies longitude (``np.array(...)``) before
+    normalising it into [0, 360). If that ever became ``np.asarray``, this path would
+    silently rewrite the caller's dask block in place -- and with a shared, cached block
+    that corruption would be extremely hard to trace. Pin it.
+    """
+    import numpy as np
+
+    from PyESPER.xr_methods import _estimate_block
+
+    n = 32
+    rng = np.random.default_rng(0)
+    # Longitudes deliberately spanning the branches defaults() rewrites: <0 and >360.
+    lon = np.linspace(-170.0, 400.0, n)
+    lat = rng.uniform(-70.0, 70.0, n)
+    depth = rng.uniform(0.0, 4000.0, n)
+    sal = rng.uniform(32.0, 36.0, n)
+    temp = rng.uniform(-1.0, 25.0, n)
+    dates = np.full(n, 2002.0)
+    originals = [a.copy() for a in (sal, temp, lon, lat, depth, dates)]
+
+    _estimate_block(
+        sal, temp, lon, lat, depth, dates,
+        variables=["TA"], path="", method="nn", equation=8,
+    )
+
+    for name, before, after in zip(
+        ("salinity", "temperature", "longitude", "latitude", "depth", "dates"),
+        originals,
+        (sal, temp, lon, lat, depth, dates),
+    ):
+        np.testing.assert_array_equal(
+            after, before, err_msg=f"_estimate_block mutated the caller's {name}"
+        )
