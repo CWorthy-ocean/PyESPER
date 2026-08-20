@@ -236,7 +236,7 @@ def warmup() -> None:
 
     with kernel_lock():
         import PyESPER.eos80_jit as sw
-        from PyESPER.run_nets import _tansig
+        from PyESPER.kernels import warmup_nn
 
         depth = np.array([0.0, 10.0], dtype=np.float64)
         lat = np.array([0.0, 45.0], dtype=np.float64)
@@ -246,4 +246,4 @@ def warmup() -> None:
         sw.ptmp(sal, temp, pressure, 0.0)
         sw.satO2(sal, temp)
         sw.dens(sal, temp, pressure)
-        _tansig(np.zeros((2, 2), dtype=np.float64))
+        warmup_nn()

@@ -17,12 +17,14 @@ module's only real parallelism lever: make each chunk as large as memory affords
 :data:`_MAX_POINTS_PER_CHUNK`) rather than relying on many small chunks running at once,
 since they never do.
 
-**"Bounded by the chunk size" assumes the chunks are actually small** -- ``run_nets``'s
-own memory cost is roughly 10 KB *per point* (empirically measured; dominated by
-``batched_forward`` holding a ``(G stacked nets, hidden width, Q points)`` activation
-array -- e.g. 12 nets x ~40 hidden units x Q points x 8 bytes, times ~2 for the
-``tansig`` output buffer alongside its input), not the few bytes per point a caller
-would expect from the *input* arrays' own dtype. A caller's existing dask chunking
+**"Bounded by the chunk size" assumes the chunks are actually small.** This used to be
+acute: ``run_nets`` cost roughly 10 KB *per point*, because it carried a ``(stacked
+nets, hidden width, Q points)`` activation array from layer to layer. The fused tiled
+kernel that replaced it (see ``PyESPER/kernels/nn_forward.py``) holds no array sized by
+both net count and point count, and measures ~450 bytes per point; the per-chunk
+pipeline around it costs more than the kernel does now. The cap below is consequently
+far more conservative than it needs to be -- it is left large-but-finite as a backstop
+against the OOM described below, not because the old per-point cost still applies. A caller's existing dask chunking
 (e.g. a physics grid regridded with the entire vertical dimension in one chunk) can
 easily produce chunks of tens of millions of points -- fine for a plain regrid, but
 enough to demand 100+ GB for a single ``run_nets`` call. This module defensively
