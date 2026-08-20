@@ -3,6 +3,8 @@ from scipy.interpolate import RegularGridInterpolator, NearestNDInterpolator
 import matplotlib
 import warnings
 
+from PyESPER.kernels import grid_cache
+
 
 def interpolate(Path, Gdf={}, AAdata={}, Elsedata={}, verbose=False):
     """
@@ -180,9 +182,15 @@ def interpolate(Path, Gdf={}, AAdata={}, Elsedata={}, verbose=False):
             fill_value=np.nan,
         )
 
-    # run each of the interps in turn
-    interp_aa = build_interpolant(aa_bool)
-    interp_else = build_interpolant(else_bool)
+    # Building these is the expensive, point-independent part of this function: two
+    # cKD-tree constructions over the ~106k-node ESPER grid plus a ~106k-point query
+    # each, then two RegularGridInterpolators. None of it depends on the caller's
+    # points, so it is memoised per (data directory, ordered combination names) -- see
+    # PyESPER.kernels.grid_cache. Everything below this line is the cheap part that
+    # genuinely varies per call.
+    interp_aa, interp_else = grid_cache.interpolants(
+        Path, Gdf, lambda: (build_interpolant(aa_bool), build_interpolant(else_bool))
+    )
 
     def process_grid(data_values, interpolant):
         """
