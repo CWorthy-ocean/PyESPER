@@ -9,10 +9,11 @@ Seawater property estimation is **point-independent**: each location's estimate 
 only on its own longitude/latitude/depth/salinity/temperature(/date). That makes it a
 natural fit for :func:`xarray.apply_ufunc` with ``dask="parallelized"`` -- dask invokes
 the kernel on one chunk at a time, so peak memory is bounded by the chunk size (not the
-whole domain or the number of time records). **Chunks must NOT be computed
-concurrently with each other, though** -- see the neural-net thread-safety note below --
-so unlike a typical dask array, "peak memory bounded by chunk size" is this module's
-only real parallelism lever: make each chunk as large as memory affords (see
+whole domain or the number of time records). **Chunks are never processed concurrently**
+-- :func:`PyESPER.concurrency.kernel_lock` enforces that from inside this module, under
+whatever scheduler the caller happens to use (see the neural-net thread-safety note
+below). So unlike a typical dask array, "peak memory bounded by chunk size" is this
+module's only real parallelism lever: make each chunk as large as memory affords (see
 :data:`_MAX_POINTS_PER_CHUNK`) rather than relying on many small chunks running at once,
 since they never do.
 
@@ -46,23 +47,32 @@ Notes
 -----
 * NaN inputs (e.g. land cells on a model grid) are handled: non-finite points are skipped
   and returned as NaN, so the underlying routines only ever see valid points.
-* The neural-net path (``nn_xr``/``mixed_xr``) must not have more than one chunk in
-  flight at once: ``run_nets``' ``_tansig`` kernel is itself a numba
-  ``@njit(parallel=True)`` kernel that claims every core it can see
-  (``numba.get_num_threads()``) *per call*. Several chunks entering it concurrently
+* Only one chunk may be in flight at once. ``run_nets``' ``_tansig``, and the
+  ``eos80_jit`` seawater routines that *both* the LIR and NN paths call, are numba
+  ``@njit(parallel=True)`` kernels that each claim every core they can see
+  (``numba.get_num_threads()``) *per call*. Several chunks entering them concurrently
   (dask's default threaded scheduler, several worker threads at once) was observed to
   reliably deadlock the whole process -- every thread parked in a futex wait, 0% CPU,
-  stuck at a fixed completed-chunk count -- not merely slow. Callers must run this
-  under a process/synchronous dask scheduler (one chunk at a time) so this kernel's own
-  parallelism is the only parallelism in play; see ``roms_tools.setup.esper``'s caller
-  for the concrete fix (forcing ``.compute(scheduler="synchronous")``) and
-  ``run_nets.py``'s ``batched_forward``/``_tansig`` docstrings for the full mechanism.
+  stuck at a fixed completed-chunk count -- not merely slow.
+
+  This is now enforced here rather than asked of the caller. ``_estimate_block`` runs
+  inside :func:`PyESPER.concurrency.kernel_lock`, a module-level semaphore, so exactly
+  one chunk is ever inside a numba parallel region no matter which scheduler the caller
+  chose. The earlier advice -- "run under a synchronous scheduler" -- was not
+  enforceable, because these functions return *lazy* arrays and never see the
+  ``.compute()`` call; it also was not in fact being followed by
+  ``roms_tools.setup.esper``, which is why production saw both the deadlock and the
+  associated n_workers-times-chunk memory blowup. See ``PyESPER/concurrency.py`` for the
+  policy and its escape hatches, and ``run_nets.py``'s ``batched_forward``/``_tansig``
+  docstrings for the kernel-level mechanism.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import xarray as xr
+
+from PyESPER.concurrency import kernel_lock
 
 # ESPER's estimable variables (PyESPER naming).
 VALID_VARIABLES = ("TA", "DIC", "pH", "phosphate", "nitrate", "silicate", "oxygen")
@@ -164,24 +174,40 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
         return tuple(outs)
 
     idx = np.flatnonzero(valid)
-    coords = {
-        "longitude": lon_f[idx].tolist(),
-        "latitude": lat_f[idx].tolist(),
-        "depth": depth_f[idx].tolist(),
-    }
-    preds = {
-        "salinity": sal_f[idx].tolist(),
-        "temperature": temp_f[idx].tolist(),
-    }
-    est = _method_fn(method)(
-        list(variables), path, coords, preds, dates_f[idx].tolist(), equation
-    )
 
-    flat_outs = [np.full(sal_f.shape, np.nan, dtype="float64") for _ in range(n_out)]
-    for i, var in enumerate(variables):
-        key = f"{var}{equation}"
-        flat_outs[i][idx] = np.asarray(est[key], dtype="float64").ravel()
-        outs[i] = flat_outs[i].reshape(shape)
+    # Everything from here on is serialised, not just the kernel call itself.
+    #
+    # Two reasons. (1) Safety: PyESPER's numba kernels are ``@njit(parallel=True)`` and
+    # each claims the whole thread pool per call, so several dask worker threads
+    # entering them at once deadlocks the process -- see ``PyESPER.concurrency`` for the
+    # mechanism and the escape hatches. (2) Memory: the bulk of a block's footprint is
+    # the ``.tolist()`` conversions below and the estimation call's own temporaries, so
+    # the lock has to be held across those too for peak memory to be a deterministic
+    # one-chunk bound rather than one-chunk-times-workers. Acquiring it only around the
+    # estimation call would leave every waiting worker holding a full set of
+    # point-length Python lists.
+    with kernel_lock():
+        coords = {
+            "longitude": lon_f[idx].tolist(),
+            "latitude": lat_f[idx].tolist(),
+            "depth": depth_f[idx].tolist(),
+        }
+        preds = {
+            "salinity": sal_f[idx].tolist(),
+            "temperature": temp_f[idx].tolist(),
+        }
+        est = _method_fn(method)(
+            list(variables), path, coords, preds, dates_f[idx].tolist(), equation
+        )
+        del coords, preds
+
+        flat_outs = [
+            np.full(sal_f.shape, np.nan, dtype="float64") for _ in range(n_out)
+        ]
+        for i, var in enumerate(variables):
+            key = f"{var}{equation}"
+            flat_outs[i][idx] = np.asarray(est[key], dtype="float64").ravel()
+            outs[i] = flat_outs[i].reshape(shape)
     return tuple(outs)
 
 

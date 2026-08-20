@@ -60,12 +60,16 @@ def _tansig(x):
     scheduler, several chunks in flight together) multiplies that -- the same
     N-workers-x-N-threads oversubscription ``cstar_forge`` already guards
     against for BLAS (see its ``executor.py``/``input_data.py``, which pins BLAS
-    to 1 thread and caps dask's worker count for exactly this reason) and that
-    ``PyESPER/xr_methods.py``'s module docstring already flags as a numba
-    first-compilation thread-safety concern for this exact neural-net path.
-    Run ESPER generation under a synchronous/serial dask scheduler (one chunk
-    at a time) so this function's own parallelism is the only parallelism in
-    play, rather than trying to have both at once.
+    to 1 thread and caps dask's worker count for exactly this reason).
+
+    The gridded entry points now enforce one-at-a-time entry themselves rather
+    than relying on the caller to choose a serial dask scheduler: see
+    ``PyESPER/concurrency.py`` and the ``kernel_lock()`` around
+    ``xr_methods._estimate_block``. Measured at 1.6M points in 8 chunks under
+    dask's threaded scheduler with 8 workers, serialising cut peak RSS from
+    13.8+ GB to 4.2 GB. Anything that calls ``run_nets`` directly, outside
+    ``xr_methods``, is still responsible for not doing so from several threads
+    at once -- wrap it in ``kernel_lock()`` if in doubt.
     """
     # `.ravel()` only avoids a copy when `x` is already contiguous; `x` always
     # is in practice here (fresh output of `matmul` + broadcast-add, never a
@@ -252,10 +256,12 @@ def run_nets(DesiredVariables, Equations, code={}):
     parallelizes internally across every core it can see; running multiple
     chunks of a large grid through ``run_nets`` concurrently (e.g. one
     dask/thread-pool worker per chunk) means each concurrent call fights the
-    others for the same cores instead of one call getting to use all of them
-    -- see ``_tansig``'s docstring for the full explanation and the mitigation
-    (run chunks serially, one at a time, so this function's own parallelism is
-    the only parallelism in play for that step).
+    others for the same cores instead of one call getting to use all of them,
+    and multiplies peak memory by the worker count. That is now handled inside
+    the package rather than by convention -- ``xr_methods._estimate_block``
+    holds ``PyESPER.concurrency.kernel_lock()`` for the whole block, so exactly
+    one chunk is ever in here regardless of the caller's dask scheduler. See
+    ``_tansig``'s docstring and ``PyESPER/concurrency.py``.
     """
 
     # Predefining dictionaries to populate
