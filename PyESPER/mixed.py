@@ -20,6 +20,8 @@ def mixed(DesiredVariables, Path, OutputCoordinates={}, PredictorMeasurements={}
 
     # Fetch estimates and uncertainties from PyESPER_LIR and PyESPER_NN
     EstimatesLIR, _, UncertaintiesLIR = lir(DesiredVariables, Path, OutputCoordinates, PredictorMeasurements, **kwargs)
+    # nn() has no coefficient output, so this kwarg is LIR-only.
+    kwargs.pop("want_coefficients", None)
     EstimatesNN, UncertaintiesNN = nn(DesiredVariables, Path, OutputCoordinates, PredictorMeasurements, **kwargs)
 
     Estimates, Uncertainties = {}, {}

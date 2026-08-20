@@ -37,6 +37,7 @@ import threading
 _LOCK = threading.Lock()
 _MAT_CACHE: dict[tuple, dict] = {}
 _INTERP_CACHE: dict[tuple, tuple] = {}
+_TABLE_CACHE: dict[tuple, tuple] = {}
 
 
 def _normalise(path) -> str:
@@ -49,6 +50,7 @@ def clear() -> None:
     with _LOCK:
         _MAT_CACHE.clear()
         _INTERP_CACHE.clear()
+        _TABLE_CACHE.clear()
 
 
 def cache_info() -> dict:
@@ -56,6 +58,7 @@ def cache_info() -> dict:
     return {
         "mat_entries": len(_MAT_CACHE),
         "interpolant_entries": len(_INTERP_CACHE),
+        "table_entries": len(_TABLE_CACHE),
     }
 
 
@@ -132,4 +135,24 @@ def interpolants(path, gdf, build):
         if entry is None:
             entry = build()
             _INTERP_CACHE[key] = entry
+    return entry
+
+
+def stacked_table(path, gdf, build):
+    """Memoise the kernel-ready coefficient table derived from the interpolants.
+
+    Same key and lock discipline as :func:`interpolants`. Kept as a separate entry
+    because it is a different representation of the same data -- one contiguous
+    ``(2, nx, ny, nz, n_combo, n_coef)`` array, region-major, so the kernel can select a
+    point's region by indexing rather than by branching between two objects.
+    """
+    key = (_normalise(path), tuple(gdf))
+    entry = _TABLE_CACHE.get(key)
+    if entry is not None:
+        return entry
+    with _LOCK:
+        entry = _TABLE_CACHE.get(key)
+        if entry is None:
+            entry = build()
+            _TABLE_CACHE[key] = entry
     return entry

@@ -160,6 +160,9 @@ def _method_fn(method):
                 variables, path, coords, preds,
                 EstDates=dates, Equations=[equation],
                 verbose=False, compute_uncertainties=False,
+                # Coefficients are 6 float64 per point per variable and nothing here
+                # looks at them.
+                want_coefficients=False,
             )
             return est
 
@@ -184,6 +187,7 @@ def _method_fn(method):
             variables, path, coords, preds,
             EstDates=dates, Equations=[equation],
             verbose=False, compute_uncertainties=False,
+            want_coefficients=False,
         )
         return est
 
