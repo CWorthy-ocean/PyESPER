@@ -41,8 +41,15 @@ _TABLE_CACHE: dict[tuple, tuple] = {}
 
 
 def _normalise(path) -> str:
-    """Absolute, symlink-resolved form of the data directory, for use as a cache key."""
-    return os.path.realpath(str(path))
+    """Canonical form of the data directory, for use as a cache key and for loads.
+
+    Resolves an empty/None ``path`` through :func:`PyESPER.paths.data_root` (env var,
+    then auto-detection next to the installed package), then makes it absolute and
+    symlink-free so two spellings of the same directory share one cache entry.
+    """
+    from PyESPER.paths import data_root
+
+    return os.path.realpath(data_root(path))
 
 
 def clear() -> None:
@@ -69,7 +76,8 @@ def variable_grids(variable: str, path) -> dict:
     per-equation coefficient arrays. Cached per *single* variable rather than per
     request, so a six-variable call and a later one-variable call share the loads.
     """
-    key = (_normalise(path), variable)
+    path = _normalise(path)
+    key = (path, variable)
     entry = _MAT_CACHE.get(key)
     if entry is not None:
         return entry

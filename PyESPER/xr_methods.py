@@ -356,8 +356,12 @@ def lir_xr(salinity, temperature, longitude, latitude, depth, *,
     variables : str or list of str
         ESPER variable name(s) to estimate: subset of ``TA``, ``DIC``, ``phosphate``,
         ``nitrate``, ``silicate``, ``oxygen``, ``pH``.
-    path : str
-        Directory containing the ESPER data (``Mat_fullgrid/`` etc.).
+    path : str, optional
+        Directory containing the ESPER data (``Mat_fullgrid/`` etc.). Optional:
+        when omitted (or empty), it is resolved via :func:`PyESPER.paths.data_root`
+        -- the ``PYESPER_DATA_DIR`` environment variable, else auto-detected next
+        to the installed package (works for a repository checkout on ``sys.path``
+        and for an editable ``pip install -e``).
     equation : int
         8 (salinity + temperature) or 16 (salinity only).
     est_dates : float or xarray.DataArray, optional
