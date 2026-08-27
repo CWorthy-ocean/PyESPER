@@ -29,6 +29,13 @@ def process_netresults(Equations, code={}, df={}, EstAtl={}, EstOther={}):
 
     import numpy as np
 
+    def _as_bool(values):
+        """Boolean view of a region indicator, accepting the legacy string form."""
+        arr = np.asarray(values)
+        if arr.dtype.kind in "US":
+            return arr == "True"
+        return arr.astype(bool)
+
     # Function to provide the mean of values when needed. `estimates[key]` is
     # an (n_points, 4) array (stacked ensemble members from run_nets); a single
     # vectorized mean over axis=1 replaces the previous per-point `np.mean()`
@@ -58,10 +65,11 @@ def process_netresults(Equations, code={}, df={}, EstAtl={}, EstOther={}):
         latitude = np.asarray(latitude, dtype=float)
         aainds = np.asarray(aainds, dtype=bool)
         beringinds = np.asarray(beringinds, dtype=bool)
-        # SAtlInds/SoAfrInds are lists of the strings 'True'/'False' (see
-        # define_polygons), not booleans -- match the original string comparison.
-        satlinds_bool = np.asarray(satlinds) == "True"
-        safrinds_bool = np.asarray(safrinds) == "True"
+        # define_polygons now returns real boolean arrays. Older versions returned lists
+        # of the strings 'True'/'False'; accept both so a caller passing a hand-built
+        # `df` (or an older define_polygons) keeps working.
+        satlinds_bool = _as_bool(satlinds)
+        safrinds_bool = _as_bool(safrinds)
 
         esta = Esta[codename]
         esto = Esto[codename]
@@ -88,14 +96,10 @@ def process_netresults(Equations, code={}, df={}, EstAtl={}, EstOther={}):
 
         Estimate[codename] = np.where(safrinds_bool, ESaf[codename], ESat2[codename])
 
-    # Bookkeeping blanks back to NaN as needed (dead in practice: v is now an
-    # ndarray, which -- like the original list -- never compares equal to '').
-    # Convert back to plain Python lists to preserve the original return-type
-    # contract of this function (some callers besides roms-tools may rely on
-    # list semantics, e.g. JSON serialization).
-    Estimate = {
-        k: ('NaN' if isinstance(v, str) and v == '' else v.tolist())
-        for k, v in Estimate.items()
-    }
-
+    # Values stay as float64 ndarrays. They used to be converted back to Python lists
+    # here to preserve an older return-type contract, but every consumer in this package
+    # immediately calls np.array/np.asarray on them again (pH_DIC_nn_adjustment,
+    # final_formatting, mixed, xr_methods), so the round-trip only cost memory and time
+    # -- at 200k points it was a measurable fraction of the whole call, against a neural
+    # net evaluation that now takes well under a tenth of a second.
     return Estimate
