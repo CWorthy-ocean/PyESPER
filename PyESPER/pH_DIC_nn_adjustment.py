@@ -27,7 +27,9 @@ def pH_DIC_nn_adjustment(Path, DesiredVariables, Estimates, YouHaveBeenWarnedCan
     from PyESPER.define_polygons import define_polygons
     from PyESPER.run_nets import run_nets
     from PyESPER.process_netresults import process_netresults
-    import seawater as sw
+    # NJIT'd EOS-80, same formulation as the `seawater` package it replaces
+    # (see iterations.py / concurrency.py, migrated in 24c63cd).
+    import PyESPER.eos80_jit as sw
     import PyCO2SYS as pyco2
 
     # Interpreting kwargs and setting defaults if needed
@@ -134,7 +136,15 @@ def pH_DIC_nn_adjustment(Path, DesiredVariables, Estimates, YouHaveBeenWarnedCan
                      )
                     EstAlk = np.array(alkest["TA16"])
                     EstSi = EstP = [0] * len(EstAlk)
-                    Pressure = sw.pres(OutputCoordinates["depth"], OutputCoordinates["latitude"])
+                    # eos80_jit is njit'd, so it needs a real float ndarray: it rejects
+                    # the reflected lists the public API accepts (see examples.py) and
+                    # indexes .shape[0], so it also rejects 0-d scalars that the
+                    # `seawater` package tolerated. atleast_1d covers both; it is a
+                    # no-op for the ndarrays the xr/dask path already supplies.
+                    Pressure = sw.pres(
+                        np.atleast_1d(np.asarray(OutputCoordinates["depth"], dtype=float)),
+                        np.atleast_1d(np.asarray(OutputCoordinates["latitude"], dtype=float)),
+                    )
                     Est = np.array(values)
                         
                     # CO2SYS calculations
