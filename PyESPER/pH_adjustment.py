@@ -42,7 +42,9 @@ def pH_adjustment(
     """
 
     import numpy as np
-    import seawater as sw
+    # NJIT'd EOS-80, same formulation as the `seawater` package it replaces
+    # (see iterations.py / concurrency.py, migrated in 24c63cd).
+    import PyESPER.eos80_jit as sw
     import PyCO2SYS as pyco2
     from PyESPER.inputdata_organize import inputdata_organize
     from PyESPER.temperature_define import temperature_define
@@ -117,7 +119,15 @@ def pH_adjustment(
                     EstAlk = np.transpose(EstAlk)
                     EstSi = EstP = [0] * len(EstAlk)
                     # Calculating pressure using the sw package
-                    Pressure = sw.pres(OutputCoordinates["depth"], OutputCoordinates["latitude"])
+                    # eos80_jit is njit'd, so it needs a real float ndarray: it rejects
+                    # the reflected lists the public API accepts (see examples.py) and
+                    # indexes .shape[0], so it also rejects 0-d scalars that the
+                    # `seawater` package tolerated. atleast_1d covers both; it is a
+                    # no-op for the ndarrays the xr/dask path already supplies.
+                    Pressure = sw.pres(
+                        np.atleast_1d(np.asarray(OutputCoordinates["depth"], dtype=float)),
+                        np.atleast_1d(np.asarray(OutputCoordinates["latitude"], dtype=float)),
+                    )
                     Est = np.array(values)
                     Est = np.transpose(Est)
                     Est = Est[0]
