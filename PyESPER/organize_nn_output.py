@@ -95,13 +95,17 @@ def organize_nn_output(Path, DesiredVariables, OutputCoordinates={}, PredictorMe
       
         emlr.append(EMLR)
         names = list(PredictorMeasurements.keys())
-        PMs = list(PredictorMeasurements.values())
 
-        # Replace "nan" with 0 in PMs using list comprehensions
-        PMs_nonan = [[0 if val == "nan" else val for val in pm] for pm in PMs]
-        
-        # Transpose PMs_nonan
-        PMs = np.transpose(PMs_nonan)
+        # Predictors as one (n_points, n_predictors) float64 matrix.
+        #
+        # This was a per-point double list comprehension
+        # (``[[0 if val == "nan" else val for val in pm] for pm in PMs]``) followed by
+        # np.transpose. Note what that comparison actually did: ``val == "nan"`` tests
+        # against the *string* "nan", so it never matched a float NaN -- for the numeric
+        # input every caller in this package supplies it was a pure copy. The string
+        # form is still honoured below, for a caller passing the documented list-of-
+        # strings, so this is behaviour-preserving rather than a tightening.
+        PMs = _predictor_matrix(PredictorMeasurements.values())
             
         PMs3, DMs3 = {}, {}
             
@@ -121,10 +125,17 @@ def organize_nn_output(Path, DesiredVariables, OutputCoordinates={}, PredictorMe
             PMs2 = PMs + Pert
             DMs2 = PMs + DefaultPert
         
-            # Update PMs3 and DMs3 dictionaries
+            # Update PMs3 and DMs3 dictionaries.
+            #
+            # Contiguous float64 copies rather than ``.tolist()``: a list of n Python
+            # floats costs ~40 bytes/point against 8, and every consumer downstream
+            # (defaults/inputdata_organize/iterations/temperature_define) immediately
+            # converts back to an array. Copies rather than views because
+            # temperature_define may write into these in place, and a view would
+            # reach back into PMs2/DMs2.
             for col, name in enumerate(names):
-                PMs3[name] = PMs2[:, col].tolist()
-                DMs3[name] = DMs2[:, col].tolist()
+                PMs3[name] = np.ascontiguousarray(PMs2[:, col])
+                DMs3[name] = np.ascontiguousarray(DMs2[:, col])
         
             # Run preprocess_applynets for perturbed and default data
             VTF = False
@@ -242,25 +253,55 @@ def organize_nn_output(Path, DesiredVariables, OutputCoordinates={}, PredictorMe
             
     # Compute final uncertainty propagation
             
-    est = [np.array(v) for v in Estimate.values()]
     emlr_combined = {k: v for d in emlr for k, v in d.items()}
+    n_predictors = len(PredictorMeasurements)
     Uncertainties = {}
-    for dv in range(0, len(DesiredVariables)):
-        dvu = []
-        for eq in range(0, len(Equations)):
-            sumu = []
-            name = DesiredVariables[dv] + str(Equations[eq])
-            for n in range(0, len(est[0])):
-                # Collect uncertainty contributions from each perturbation
-                u =  np.array([Unc_final[dv][pre][eq][n] for pre in range(len(PredictorMeasurements))])
-                du = np.array([DUnc_final[dv][pre][eq][n] for pre in range(len(PredictorMeasurements))])
-                eu = emlr_combined[name][n]
-                # Final uncertainty formula
-                total_uncertainty = np.sqrt(np.sum(u) - np.sum(du) + eu**2)
-                sumu.append(total_uncertainty)
-            dvu.append(sumu)
 
-            Uncertainties[name] = sumu
+    # Combine the perturbation contributions.
+    #
+    # This was a loop over every point, inside loops over variable and equation,
+    # building two n_predictors-long np.arrays and calling np.sum on each -- at 100k
+    # points and six variables, 1.2M array allocations and 1.2M ufunc reductions, and
+    # half the total runtime of the uncertainty path. Summing along a stacked
+    # predictor axis instead is the identical arithmetic: the same float64 addends
+    # accumulated in the same order (numpy reduces axis 0 sequentially), so the result
+    # is bit-identical -- pinned by test_uncertainty.py.
+    #
+    # np.sqrt of a negative variance still yields NaN, exactly as before; unlike the
+    # LIR kernel this path deliberately does not clamp to zero.
+    for dv, variable in enumerate(DesiredVariables):
+        for eq_index, equation in enumerate(Equations):
+            name = f"{variable}{equation}"
+            u = np.stack([
+                np.asarray(Unc_final[dv][pre][eq_index], dtype=np.float64).ravel()
+                for pre in range(n_predictors)
+            ])
+            du = np.stack([
+                np.asarray(DUnc_final[dv][pre][eq_index], dtype=np.float64).ravel()
+                for pre in range(n_predictors)
+            ])
+            eu = np.asarray(emlr_combined[name], dtype=np.float64).ravel()
+            Uncertainties[name] = np.sqrt(u.sum(axis=0) - du.sum(axis=0) + eu**2)
 
     return Uncertainties
 
+
+def _predictor_matrix(values):
+    """Stack predictor columns into one ``(n_points, n_predictors)`` float64 array.
+
+    Accepts the numeric arrays the package uses internally and also the
+    list-of-strings form the public API documents, where a missing value is the
+    literal ``"nan"`` and the original code mapped it to 0.
+    """
+    import numpy as np
+
+    columns = []
+    for value in values:
+        column = np.asarray(value)
+        if column.dtype.kind in "OUS":
+            # Legacy string input: "nan" meant zero here, not NaN.
+            column = np.where(column == "nan", 0.0, column).astype(np.float64)
+        else:
+            column = column.astype(np.float64, copy=False)
+        columns.append(column)
+    return np.column_stack(columns)
