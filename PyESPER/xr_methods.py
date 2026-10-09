@@ -194,12 +194,19 @@ def _method_fn(method):
     return _call
 
 
-def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, method, equation):
+def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, method, equation,
+                    salinity_conditioning=None):
     """Estimate ``variables`` for one (numpy) block of points.
 
     All inputs are numpy arrays of an identical arbitrary shape (the dask block). Returns
     a tuple of arrays (one per variable, in ``variables`` order), each the same shape as
-    the inputs, in µmol/kg. Non-finite points are returned as NaN.
+    the inputs, in µmol/kg -- or the bare array when exactly one variable was requested,
+    which is what ``apply_ufunc`` expects for a single output. Non-finite points are
+    returned as NaN.
+
+    ``salinity_conditioning`` (a :class:`PyESPER.salinity_conditioning.SalinityConditioning`
+    or ``None``) replaces the salinity handed to the nets with its raised-cosine blend
+    toward the WOA climatology below the band; the caller's array is never modified.
     """
     shape = sal.shape
     n_out = len(variables)
@@ -217,7 +224,7 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
         & np.isfinite(lat_f) & np.isfinite(depth_f) & np.isfinite(dates_f)
     )
     if not valid.any():
-        return tuple(outs)
+        return _as_outputs(outs)
 
     idx = np.flatnonzero(valid)
 
@@ -244,8 +251,13 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
             "latitude": lat_f[idx],
             "depth": depth_f[idx],
         }
+        sal_in = sal_f[idx]
+        if salinity_conditioning is not None:
+            # Only the salinity the nets see changes; the density/unit conversion a
+            # caller does afterwards is theirs to decide (roms-tools uses the same S').
+            sal_in = salinity_conditioning.apply(sal_in, lon_f[idx], lat_f[idx], depth_f[idx])
         preds = {
-            "salinity": sal_f[idx],
+            "salinity": sal_in,
             "temperature": temp_f[idx],
         }
         est = _method_fn(method)(
@@ -260,13 +272,28 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
             key = f"{var}{equation}"
             flat_outs[i][idx] = np.asarray(est[key], dtype="float64").ravel()
             outs[i] = flat_outs[i].reshape(shape)
-    return tuple(outs)
+    return _as_outputs(outs)
+
+
+def _as_outputs(outs):
+    """One output -> the array itself; several -> a tuple (apply_ufunc's contract)."""
+    return outs[0] if len(outs) == 1 else tuple(outs)
 
 
 def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
                  variables, path, method, equation, est_dates,
-                 max_points_per_chunk=None):
+                 max_points_per_chunk=None, salinity_conditioning=None):
     """Shared implementation for ``lir_xr``/``nn_xr``/``mixed_xr``."""
+    if salinity_conditioning is not None:
+        from PyESPER.salinity_conditioning import SalinityConditioning
+
+        if not isinstance(salinity_conditioning, SalinityConditioning):
+            raise TypeError(
+                "salinity_conditioning must be a "
+                "PyESPER.salinity_conditioning.SalinityConditioning (or None), got "
+                f"{type(salinity_conditioning).__name__}. Build one with the path to "
+                "the WOA23 annual salinity file; PyESPER does not download it."
+            )
     if isinstance(variables, str):
         variables = [variables]
     variables = list(variables)
@@ -331,7 +358,8 @@ def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
         _estimate_block,
         sal, temp, lon, lat, dep, dates,
         kwargs=dict(
-            variables=variables, path=str(path), method=method, equation=equation
+            variables=variables, path=str(path), method=method, equation=equation,
+            salinity_conditioning=salinity_conditioning,
         ),
         output_core_dims=[[]] * len(variables),
         dask="parallelized",
@@ -344,7 +372,7 @@ def _estimate_xr(salinity, temperature, longitude, latitude, depth, *,
 
 def lir_xr(salinity, temperature, longitude, latitude, depth, *,
            variables, path="", equation=8, est_dates=None,
-           max_points_per_chunk=None):
+           max_points_per_chunk=None, salinity_conditioning=None):
     """Dask-lazy LIR estimates as xarray DataArrays. See module docstring.
 
     Parameters
@@ -370,6 +398,12 @@ def lir_xr(salinity, temperature, longitude, latitude, depth, *,
         Override the automatic points-per-chunk cap. By default it is derived from a
         24 GiB budget (``PYESPER_CHUNK_MEMORY``) and this request's measured per-point
         cost. Chunks smaller than the cap are never grown.
+    salinity_conditioning : PyESPER.salinity_conditioning.SalinityConditioning, optional
+        Replace the salinity *fed to the nets* with a raised-cosine blend toward the
+        WOA23 annual climatology below a band (default 31-34 PSU), where ESPER has no
+        training support and extrapolates unphysically. Off by default; above the band
+        the estimates are bit-identical to the unconditioned call. The climatology file
+        is supplied by the caller (not downloaded): see that module for the URL.
 
     Returns
     -------
@@ -380,26 +414,29 @@ def lir_xr(salinity, temperature, longitude, latitude, depth, *,
         salinity, temperature, longitude, latitude, depth,
         variables=variables, path=path, method="lir", equation=equation,
         est_dates=est_dates, max_points_per_chunk=max_points_per_chunk,
+        salinity_conditioning=salinity_conditioning,
     )
 
 
 def nn_xr(salinity, temperature, longitude, latitude, depth, *,
           variables, path="", equation=8, est_dates=None,
-          max_points_per_chunk=None):
+          max_points_per_chunk=None, salinity_conditioning=None):
     """Dask-lazy neural-network estimates as xarray DataArrays. See :func:`lir_xr`."""
     return _estimate_xr(
         salinity, temperature, longitude, latitude, depth,
         variables=variables, path=path, method="nn", equation=equation,
         est_dates=est_dates, max_points_per_chunk=max_points_per_chunk,
+        salinity_conditioning=salinity_conditioning,
     )
 
 
 def mixed_xr(salinity, temperature, longitude, latitude, depth, *,
              variables, path="", equation=8, est_dates=None,
-             max_points_per_chunk=None):
+             max_points_per_chunk=None, salinity_conditioning=None):
     """Dask-lazy LIR+NN ensemble-mean estimates as xarray DataArrays. See :func:`lir_xr`."""
     return _estimate_xr(
         salinity, temperature, longitude, latitude, depth,
         variables=variables, path=path, method="mixed", equation=equation,
         est_dates=est_dates, max_points_per_chunk=max_points_per_chunk,
+        salinity_conditioning=salinity_conditioning,
     )

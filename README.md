@@ -102,6 +102,30 @@ outputs = PyESPER.emlr_estimate(
 | `PerKgSwTF` | `bool` | `True` | Set to `False` if your inputs are volumetric (µmol/L) rather than molal (µmol/kg). Outputs are always molal. |
 | `VerboseTF` | `bool` | `True` | Toggles terminal logging. |
 
+### Salinity conditioning (fork addition, xarray wrappers)
+
+ESPER was fit to GLODAP bottle data, which has almost no tropical or mid-latitude
+observations below ~31 PSU. Fed a river-plume salinity the nets extrapolate unphysically
+(silicate > 100 µmol/kg, negative nutrients, DIC above TA). The dask-lazy wrappers
+`PyESPER.nn_xr` / `lir_xr` / `mixed_xr` can instead evaluate the nets at a raised-cosine
+blend of the model salinity toward the WOA23 annual-mean climatology below a band
+(default 31–34 PSU); above the band nothing changes. The climatology file is **not**
+downloaded by PyESPER — pass its path, and the error names the download URL if it is
+missing:
+
+```python
+from PyESPER import nn_xr
+from PyESPER.salinity_conditioning import SalinityConditioning
+
+cond = SalinityConditioning("/path/to/woa23_decav_s00_01.nc")   # low=31, high=34
+est = nn_xr(salinity, temperature, longitude, latitude, depth,
+            variables=["nitrate", "TA", "DIC"], est_dates=dates,
+            salinity_conditioning=cond)
+```
+
+See `PyESPER/salinity_conditioning.py` for the rationale and the measurements behind
+the default band.
+
 ---
 
 ## Outputs

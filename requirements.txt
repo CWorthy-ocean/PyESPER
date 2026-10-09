@@ -6,3 +6,6 @@ kiwisolver
 PyCO2SYS
 pandas
 numba
+xarray
+dask
+netCDF4
