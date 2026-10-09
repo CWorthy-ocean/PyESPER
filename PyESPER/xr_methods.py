@@ -206,7 +206,8 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
 
     ``salinity_conditioning`` (a :class:`PyESPER.salinity_conditioning.SalinityConditioning`
     or ``None``) replaces the salinity handed to the nets with its raised-cosine blend
-    toward the WOA climatology below the band; the caller's array is never modified.
+    toward the WOA climatology below the band, and dilutes the TA/DIC estimates back
+    to the model salinity afterwards; the caller's array is never modified.
     """
     shape = sal.shape
     n_out = len(variables)
@@ -270,7 +271,14 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
         ]
         for i, var in enumerate(variables):
             key = f"{var}{equation}"
-            flat_outs[i][idx] = np.asarray(est[key], dtype="float64").ravel()
+            values = np.asarray(est[key], dtype="float64").ravel()
+            if salinity_conditioning is not None:
+                # TA/DIC come back for S' water; move them to the model salinity
+                # (identity above the band). Nutrients/oxygen pass through.
+                values = salinity_conditioning.dilute_carbonate(
+                    var, values, sal_f[idx], sal_in
+                )
+            flat_outs[i][idx] = values
             outs[i] = flat_outs[i].reshape(shape)
     return _as_outputs(outs)
 
@@ -401,9 +409,11 @@ def lir_xr(salinity, temperature, longitude, latitude, depth, *,
     salinity_conditioning : PyESPER.salinity_conditioning.SalinityConditioning, optional
         Replace the salinity *fed to the nets* with a raised-cosine blend toward the
         WOA23 annual climatology below a band (default 31-34 PSU), where ESPER has no
-        training support and extrapolates unphysically. Off by default; above the band
-        the estimates are bit-identical to the unconditioned call. The climatology file
-        is supplied by the caller (not downloaded): see that module for the URL.
+        training support and extrapolates unphysically, then dilute the TA/DIC
+        estimates back to the model salinity along a conservative mixing line. Off by
+        default; above the band the estimates are bit-identical to the unconditioned
+        call. The climatology file is supplied by the caller (not downloaded): see that
+        module for the URL and the endmember defaults.
 
     Returns
     -------

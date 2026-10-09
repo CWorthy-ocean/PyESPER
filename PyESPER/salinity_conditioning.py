@@ -28,6 +28,24 @@ near-zero phosphate at a conditioned S ~ 31.6 in the winter Bay of Bengal agrees
 GLODAP observations there (cell means 0.01-0.12 µmol/kg), i.e. it is what the nets were
 trained on, not a defect.
 
+**TA and DIC are diluted back to the model salinity.** Conditioning evaluates the nets at
+S′, so on its own it would hand back the alkalinity and DIC of ~31.5 PSU water for a
+25 PSU river plume -- but alkalinity and DIC are, to first order, conservative with
+salinity (GLODAP's Bay of Bengal surface cells give TA = 43.2 S + 768, a freshwater
+endmember near 770 µmol/kg, close to the global surface fit). So after estimation the
+two carbonate variables are moved from S′ to S along a conservative mixing line with a
+freshwater endmember::
+
+    TA  = TA0  + (TA(S′)  - TA0)  S / S′
+    DIC = DIC0 + (DIC(S′) - DIC0) S / S′
+
+with ``TA0``/``DIC0`` configurable (defaults 770 / 850 µmol/kg from the GLODAP fit).
+This preserves the DIC/TA ratio the nets produced where they have support -- hence the
+carbonate state (pCO2, pH) -- while letting both scale with salinity; on the 2014
+strips it lands within ~100 µmol/kg of the GLODAP line extrapolated to the plume.
+Nutrients and oxygen are not diluted (their freshwater endmembers are nothing like
+conservative). Above the band S == S′ and the dilution is the identity.
+
 **The climatology file is not downloaded by this package.** Pass its path explicitly via
 :class:`SalinityConditioning`; if the file is missing the error names the download URL
 (:data:`WOA23_SALINITY_URL`, the 1-degree annual-mean "decav" product, ~25 MB). Callers
@@ -62,6 +80,17 @@ WOA23_SALINITY_FILENAME = "woa23_decav_s00_01.nc"
 #: Variable name of the objectively analysed salinity in the WOA netCDF files.
 WOA_SALINITY_VARIABLE = "s_an"
 
+#: Default freshwater endmembers (µmol/kg) for diluting TA and DIC from the conditioned
+#: salinity to the model salinity: the intercepts of the GLODAPv2 surface TA-S and DIC-S
+#: fits in the Bay of Bengal (TA = 43.2 S + 768, DIC = 31.0 S + 855; 58 one-degree
+#: cells, S 31.4-35.2), close to the global surface TA-S intercept (~590). River
+#: chemistry varies (Amazon ~300, Ganges-Brahmaputra ~1700), so these are a middle value.
+DEFAULT_TA_ENDMEMBER = 770.0
+DEFAULT_DIC_ENDMEMBER = 850.0
+
+#: ESPER variable names whose estimates are diluted to the model salinity.
+CARBONATE_VARIABLES = ("TA", "DIC")
+
 #: Default band in PSU: climatology outright below ``low``, model salinity outright
 #: above ``high``. 31 is roughly where GLODAP's tropical/mid-latitude coverage ends; 34
 #: is comfortably inside it, and the taper keeps the blended field's gradient continuous
@@ -86,8 +115,15 @@ class SalinityConditioning:
     woa_salinity_path: str | os.PathLike
     low: float = DEFAULT_BAND[0]
     high: float = DEFAULT_BAND[1]
+    #: Freshwater endmembers (µmol/kg) for the conservative dilution of TA and DIC from
+    #: the conditioned salinity back to the model salinity; see the module docstring.
+    ta_endmember: float = DEFAULT_TA_ENDMEMBER
+    dic_endmember: float = DEFAULT_DIC_ENDMEMBER
 
     def __post_init__(self):
+        for name in ("ta_endmember", "dic_endmember"):
+            if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be a non-negative number, got {getattr(self, name)!r}.")
         if not self.high > self.low:
             raise ValueError(
                 f"salinity conditioning band needs high > low, got low={self.low!r}, "
@@ -125,6 +161,32 @@ class SalinityConditioning:
         )
         out[sel] = w[sel] * salinity[sel] + (1.0 - w[sel]) * clim
         return out
+
+
+    def dilute_carbonate(self, variable, estimate, salinity, conditioned) -> np.ndarray:
+        """Move a TA/DIC estimate made at ``conditioned`` salinity to the model
+        ``salinity`` along a conservative mixing line (see the module docstring).
+
+        Other variables are returned unchanged, as is every point where the two
+        salinities agree (above the band), so the identity holds bit for bit there.
+        """
+        if variable not in CARBONATE_VARIABLES:
+            return estimate
+        endmember = self.ta_endmember if variable == "TA" else self.dic_endmember
+        return dilute_to_salinity(estimate, salinity, conditioned, endmember)
+
+
+def dilute_to_salinity(estimate, salinity, conditioned, endmember) -> np.ndarray:
+    """``endmember + (estimate - endmember) * salinity / conditioned`` where the two
+    salinities differ; ``estimate`` itself elsewhere (and wherever ``conditioned`` is 0)."""
+    estimate = np.asarray(estimate, dtype="float64")
+    salinity = np.asarray(salinity, dtype="float64")
+    conditioned = np.asarray(conditioned, dtype="float64")
+    out = estimate.copy()
+    sel = (salinity != conditioned) & (conditioned > 0)
+    if sel.any():
+        out[sel] = endmember + (estimate[sel] - endmember) * salinity[sel] / conditioned[sel]
+    return out
 
 
 def raised_cosine_weight(salinity, low, high) -> np.ndarray:

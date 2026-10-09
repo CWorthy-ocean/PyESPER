@@ -14,8 +14,11 @@ import xarray as xr
 
 from PyESPER.kernels import grid_cache
 from PyESPER.salinity_conditioning import (
+    DEFAULT_DIC_ENDMEMBER,
+    DEFAULT_TA_ENDMEMBER,
     WOA23_SALINITY_URL,
     SalinityConditioning,
+    dilute_to_salinity,
     raised_cosine_weight,
     woa_salinity_interpolant,
 )
@@ -142,3 +145,54 @@ def test_cache_keyed_by_real_path(woa_file, tmp_path):
     woa_salinity_interpolant(woa_file)
     woa_salinity_interpolant(link)
     assert grid_cache.cache_info()["woa_salinity_entries"] == 1
+
+
+# ----------------------------------------------------------------- TA/DIC dilution
+
+
+def test_dilute_to_salinity_is_a_mixing_line_and_identity_above_the_band():
+    est = np.array([2200.0, 2200.0, 2200.0])
+    sal = np.array([25.0, 35.0, 31.0])
+    cond = np.array([31.0, 35.0, 31.0])  # only the first point was conditioned
+    out = dilute_to_salinity(est, sal, cond, 770.0)
+    np.testing.assert_allclose(out, [770.0 + (2200.0 - 770.0) * 25.0 / 31.0, 2200.0, 2200.0])
+    assert out[1] == est[1] and out[2] == est[2]  # bit-identical where S == S'
+
+
+def test_endmembers_are_validated(woa_file):
+    with pytest.raises(ValueError, match="ta_endmember"):
+        SalinityConditioning(woa_file, ta_endmember=-1)
+    cond = SalinityConditioning(woa_file)
+    assert (cond.ta_endmember, cond.dic_endmember) == (DEFAULT_TA_ENDMEMBER, DEFAULT_DIC_ENDMEMBER)
+
+
+def test_dilute_carbonate_touches_only_ta_and_dic(woa_file):
+    cond = SalinityConditioning(woa_file, ta_endmember=800.0, dic_endmember=900.0)
+    est = np.array([2000.0]); sal = np.array([20.0]); con = np.array([32.0])
+    np.testing.assert_allclose(cond.dilute_carbonate("TA", est, sal, con), [800.0 + 1200.0 * 20.0 / 32.0])
+    np.testing.assert_allclose(cond.dilute_carbonate("DIC", est, sal, con), [900.0 + 1100.0 * 20.0 / 32.0])
+    for v in ("nitrate", "phosphate", "silicate", "oxygen", "pH"):
+        assert cond.dilute_carbonate(v, est, sal, con) is est
+
+
+def _constant_nets(variables, path, coords, preds, dates, equation):
+    """Fake nets: TA 2200, DIC 1900, nitrate 10 everywhere (umol/kg)."""
+    n = len(preds["salinity"]); const = {"TA": 2200.0, "DIC": 1900.0, "nitrate": 10.0}
+    return {f"{v}{equation}": np.full(n, const[v]) for v in variables}
+
+
+def test_nn_xr_dilutes_carbonate_to_the_model_salinity(woa_file):
+    cond = SalinityConditioning(woa_file)
+    sal, temp, lon, lat, dep = _inputs()
+    clim = 30.0 + 0.5 + 40.5 / 90.0            # S' at the S=20 point (fully conditioned)
+    with patch("PyESPER.xr_methods._method_fn", return_value=_constant_nets):
+        out = nn_xr(sal, temp, lon, lat, dep, variables=["TA", "DIC", "nitrate"],
+                    path="/nonexistent", est_dates=2014.0, salinity_conditioning=cond)
+    ta, dic, no3 = (out[v].values for v in ("TA", "DIC", "nitrate"))
+    # S = 20 -> conditioned to clim, then diluted back to 20
+    np.testing.assert_allclose(ta[0, 0], 770.0 + (2200.0 - 770.0) * 20.0 / clim)
+    np.testing.assert_allclose(dic[0, 0], 850.0 + (1900.0 - 850.0) * 20.0 / clim)
+    # S = 35.5 (above the band): untouched; nitrate never diluted; NaN stays NaN
+    assert ta[1, 0] == 2200.0 and dic[1, 0] == 1900.0
+    np.testing.assert_array_equal(no3[:, 0], [10.0, 10.0])
+    assert np.isnan(ta[1, 1])
