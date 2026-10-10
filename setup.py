@@ -27,6 +27,11 @@ setup(
         "PyCO2SYS",
         "pandas",
         "numba",
+        # xr_methods (dask-lazy xarray wrappers) and salinity_conditioning (reads the
+        # WOA23 netCDF climatology) -- previously imported without being declared.
+        "xarray",
+        "dask",
+        "netCDF4",
     ],
     entry_points={
         "console_scripts": [

@@ -28,7 +28,8 @@ from PyESPER.xr_methods import (
 )
 
 
-def _fake_estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, method, equation):
+def _fake_estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, method, equation,
+                         salinity_conditioning=None):
     """Records the chunk's point count instead of calling any real net."""
     _fake_estimate_block.chunk_sizes.append(sal.size)
     return tuple(np.zeros(sal.shape, dtype="float64") for _ in variables)

@@ -1,0 +1,198 @@
+"""Tests for :mod:`PyESPER.salinity_conditioning` and its hook in ``xr_methods``.
+
+They use a small synthetic climatology written to ``tmp_path`` (same layout as the WOA
+file: ``s_an(time, depth, lat, lon)`` with NaN over land, 1-degree cell centres), so no
+real data or nets are needed. The nets themselves are replaced by a fake that echoes the
+salinity it was handed, which is exactly the thing these tests need to observe.
+"""
+
+from unittest.mock import patch
+
+import numpy as np
+import pytest
+import xarray as xr
+
+from PyESPER.kernels import grid_cache
+from PyESPER.salinity_conditioning import (
+    DEFAULT_DIC_ENDMEMBER,
+    DEFAULT_TA_ENDMEMBER,
+    WOA23_SALINITY_URL,
+    SalinityConditioning,
+    dilute_to_salinity,
+    raised_cosine_weight,
+    woa_salinity_interpolant,
+)
+from PyESPER.xr_methods import nn_xr
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    grid_cache.clear()
+    yield
+    grid_cache.clear()
+
+
+@pytest.fixture
+def woa_file(tmp_path):
+    """s_an = 30 + depth/100 + lat/90 on ocean cells; NaN on a land block and the
+    seam column lon=179.5, so the fill and the wrap are both exercised."""
+    depth = np.array([0.0, 50.0, 200.0])
+    lat = np.arange(-89.5, 90.0, 1.0)
+    lon = np.arange(-179.5, 180.0, 1.0)
+    d, la, lo = np.meshgrid(depth, lat, lon, indexing="ij")
+    s = 30.0 + d / 100.0 + la / 90.0
+    land = (lat[None, :, None] > 0) & (lat[None, :, None] < 10) & (lon[None, None, :] > 0) & (lon[None, None, :] < 10)
+    s = np.where(np.broadcast_to(land, s.shape), np.nan, s)
+    s[:, :, -1] = np.nan  # the 179.5 column
+    ds = xr.Dataset(
+        {"s_an": (("time", "depth", "lat", "lon"), s[None].astype("float32"))},
+        coords={"time": [0.0], "depth": depth, "lat": lat, "lon": lon},
+    )
+    path = tmp_path / "woa23_decav_s00_01.nc"
+    ds.to_netcdf(path)
+    return path
+
+
+def test_missing_file_names_the_download_url(tmp_path):
+    with pytest.raises(FileNotFoundError) as info:
+        SalinityConditioning(tmp_path / "nope.nc")
+    assert WOA23_SALINITY_URL in str(info.value)
+    assert "does not download" in str(info.value)
+
+
+def test_band_must_be_ordered(woa_file):
+    with pytest.raises(ValueError):
+        SalinityConditioning(woa_file, low=34, high=31)
+
+
+def test_weight_is_a_raised_cosine():
+    w = raised_cosine_weight(np.array([20.0, 31.0, 32.5, 34.0, 36.0, np.nan]), 31.0, 34.0)
+    np.testing.assert_allclose(w[:5], [0.0, 0.0, 0.5, 1.0, 1.0])
+    assert np.isnan(w[5])
+
+
+def test_lookup_fills_land_and_wraps_longitude(woa_file):
+    f = woa_salinity_interpolant(woa_file)
+    # Ocean cell centre: exact formula value.
+    np.testing.assert_allclose(f([-30.5], [40.5], [50.0]), [30.0 + 0.5 + 40.5 / 90.0])
+    # Land block interior: filled from a neighbour on the same level -> finite, in range.
+    v = f([5.5], [5.5], [0.0])
+    assert np.isfinite(v).all() and 29.0 < v[0] < 31.0
+    # The seam column was NaN in the file; after the fill, lon 179.5 == lon -180.5 == 539.5.
+    a, b, c = f([179.5], [-20.5], [0.0]), f([-180.5], [-20.5], [0.0]), f([539.5], [-20.5], [0.0])
+    assert np.isfinite(a).all()
+    np.testing.assert_allclose(a, b)
+    np.testing.assert_allclose(a, c)
+    # Below the deepest level: clamp to it rather than extrapolate.
+    np.testing.assert_allclose(f([-30.5], [40.5], [5000.0]), f([-30.5], [40.5], [200.0]))
+
+
+def test_apply_blends_only_below_the_band(woa_file):
+    cond = SalinityConditioning(woa_file)
+    lon, lat, dep = np.full(4, -30.5), np.full(4, 40.5), np.full(4, 50.0)
+    sal = np.array([20.0, 32.5, 34.0, 35.5])
+    clim = 30.0 + 0.5 + 40.5 / 90.0
+    out = cond.apply(sal, lon, lat, dep)
+    np.testing.assert_allclose(out, [clim, 0.5 * 32.5 + 0.5 * clim, 34.0, 35.5])
+    # Entirely above the band: returned untouched (and no lookup is built).
+    grid_cache.clear()
+    out = cond.apply(np.array([34.0, 36.0]), lon[:2], lat[:2], dep[:2])
+    np.testing.assert_array_equal(out, [34.0, 36.0])
+    assert grid_cache.cache_info()["woa_salinity_entries"] == 0
+
+
+def _echo_salinity(variables, path, coords, preds, dates, equation):
+    """Fake net: every variable returns the salinity it was handed."""
+    return {f"{v}{equation}": np.asarray(preds["salinity"]) for v in variables}
+
+
+def _inputs(chunk=None):
+    sal = xr.DataArray(np.array([[20.0, 32.5], [35.5, np.nan]]), dims=("y", "x"))
+    temp = xr.full_like(sal, 15.0)
+    lon = xr.full_like(sal, -30.5)
+    lat = xr.full_like(sal, 40.5)
+    dep = xr.full_like(sal, 50.0)
+    arrays = (sal, temp, lon, lat, dep)
+    if chunk:
+        arrays = tuple(a.chunk(chunk) for a in arrays)
+    return arrays
+
+
+@pytest.mark.parametrize("chunk", [None, {"y": 1, "x": 1}])
+def test_nn_xr_passes_conditioned_salinity_to_the_nets(woa_file, chunk):
+    cond = SalinityConditioning(woa_file)
+    clim = 30.0 + 0.5 + 40.5 / 90.0
+    with patch("PyESPER.xr_methods._method_fn", return_value=_echo_salinity):
+        off = nn_xr(*_inputs(chunk), variables="nitrate", path="/nonexistent", est_dates=2014.0)
+        on = nn_xr(*_inputs(chunk), variables="nitrate", path="/nonexistent", est_dates=2014.0,
+                   salinity_conditioning=cond)
+        off, on = off["nitrate"].compute(scheduler="synchronous"), on["nitrate"].compute(scheduler="synchronous")
+    np.testing.assert_array_equal(off.values, [[20.0, 32.5], [35.5, np.nan]])
+    np.testing.assert_allclose(on.values, [[clim, 0.5 * 32.5 + 0.5 * clim], [35.5, np.nan]])
+    # One lookup per process, however many chunks.
+    assert grid_cache.cache_info()["woa_salinity_entries"] == 1
+
+
+def test_nn_xr_rejects_a_bare_path(woa_file):
+    with pytest.raises(TypeError, match="SalinityConditioning"):
+        nn_xr(*_inputs(), variables="nitrate", path="/nonexistent",
+              salinity_conditioning=str(woa_file))
+
+
+def test_cache_keyed_by_real_path(woa_file, tmp_path):
+    link = tmp_path / "alias.nc"
+    link.symlink_to(woa_file)
+    woa_salinity_interpolant(woa_file)
+    woa_salinity_interpolant(link)
+    assert grid_cache.cache_info()["woa_salinity_entries"] == 1
+
+
+# ----------------------------------------------------------------- TA/DIC dilution
+
+
+def test_dilute_to_salinity_is_a_mixing_line_and_identity_above_the_band():
+    est = np.array([2200.0, 2200.0, 2200.0])
+    sal = np.array([25.0, 35.0, 31.0])
+    cond = np.array([31.0, 35.0, 31.0])  # only the first point was conditioned
+    out = dilute_to_salinity(est, sal, cond, 770.0)
+    np.testing.assert_allclose(out, [770.0 + (2200.0 - 770.0) * 25.0 / 31.0, 2200.0, 2200.0])
+    assert out[1] == est[1] and out[2] == est[2]  # bit-identical where S == S'
+
+
+def test_endmembers_are_validated(woa_file):
+    with pytest.raises(ValueError, match="ta_endmember"):
+        SalinityConditioning(woa_file, ta_endmember=-1)
+    cond = SalinityConditioning(woa_file)
+    assert (cond.ta_endmember, cond.dic_endmember) == (DEFAULT_TA_ENDMEMBER, DEFAULT_DIC_ENDMEMBER)
+
+
+def test_dilute_carbonate_touches_only_ta_and_dic(woa_file):
+    cond = SalinityConditioning(woa_file, ta_endmember=800.0, dic_endmember=900.0)
+    est = np.array([2000.0]); sal = np.array([20.0]); con = np.array([32.0])
+    np.testing.assert_allclose(cond.dilute_carbonate("TA", est, sal, con), [800.0 + 1200.0 * 20.0 / 32.0])
+    np.testing.assert_allclose(cond.dilute_carbonate("DIC", est, sal, con), [900.0 + 1100.0 * 20.0 / 32.0])
+    for v in ("nitrate", "phosphate", "silicate", "oxygen", "pH"):
+        assert cond.dilute_carbonate(v, est, sal, con) is est
+
+
+def _constant_nets(variables, path, coords, preds, dates, equation):
+    """Fake nets: TA 2200, DIC 1900, nitrate 10 everywhere (umol/kg)."""
+    n = len(preds["salinity"]); const = {"TA": 2200.0, "DIC": 1900.0, "nitrate": 10.0}
+    return {f"{v}{equation}": np.full(n, const[v]) for v in variables}
+
+
+def test_nn_xr_dilutes_carbonate_to_the_model_salinity(woa_file):
+    cond = SalinityConditioning(woa_file)
+    sal, temp, lon, lat, dep = _inputs()
+    clim = 30.0 + 0.5 + 40.5 / 90.0            # S' at the S=20 point (fully conditioned)
+    with patch("PyESPER.xr_methods._method_fn", return_value=_constant_nets):
+        out = nn_xr(sal, temp, lon, lat, dep, variables=["TA", "DIC", "nitrate"],
+                    path="/nonexistent", est_dates=2014.0, salinity_conditioning=cond)
+    ta, dic, no3 = (out[v].values for v in ("TA", "DIC", "nitrate"))
+    # S = 20 -> conditioned to clim, then diluted back to 20
+    np.testing.assert_allclose(ta[0, 0], 770.0 + (2200.0 - 770.0) * 20.0 / clim)
+    np.testing.assert_allclose(dic[0, 0], 850.0 + (1900.0 - 850.0) * 20.0 / clim)
+    # S = 35.5 (above the band): untouched; nitrate never diluted; NaN stays NaN
+    assert ta[1, 0] == 2200.0 and dic[1, 0] == 1900.0
+    np.testing.assert_array_equal(no3[:, 0], [10.0, 10.0])
+    assert np.isnan(ta[1, 1])

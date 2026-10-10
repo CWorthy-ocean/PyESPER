@@ -38,6 +38,8 @@ _LOCK = threading.Lock()
 _MAT_CACHE: dict[tuple, dict] = {}
 _INTERP_CACHE: dict[tuple, tuple] = {}
 _TABLE_CACHE: dict[tuple, tuple] = {}
+_NN_UNC_CACHE: dict[tuple, object] = {}
+_WOA_SALINITY_CACHE: dict[str, object] = {}
 
 
 def _normalise(path) -> str:
@@ -58,6 +60,8 @@ def clear() -> None:
         _MAT_CACHE.clear()
         _INTERP_CACHE.clear()
         _TABLE_CACHE.clear()
+        _NN_UNC_CACHE.clear()
+        _WOA_SALINITY_CACHE.clear()
 
 
 def cache_info() -> dict:
@@ -66,6 +70,8 @@ def cache_info() -> dict:
         "mat_entries": len(_MAT_CACHE),
         "interpolant_entries": len(_INTERP_CACHE),
         "table_entries": len(_TABLE_CACHE),
+        "nn_uncertainty_entries": len(_NN_UNC_CACHE),
+        "woa_salinity_entries": len(_WOA_SALINITY_CACHE),
     }
 
 
@@ -163,4 +169,51 @@ def stacked_table(path, gdf, build):
         if entry is None:
             entry = build()
             _TABLE_CACHE[key] = entry
+    return entry
+
+
+def nn_uncertainty_interpolant(path, variable, build):
+    """Memoise one variable's NN uncertainty (RMSE) interpolant.
+
+    ``emlr_nn`` used ``scipy.interpolate.griddata`` per variable *and* per equation.
+    griddata is stateless: each call re-reads ``Uncertainty_Polys``, re-flattens the
+    1408-node (16 equation x 11 salinity x 8 depth) RMSE grid through a Python
+    comprehension, and rebuilds a 3-D Qhull triangulation over it -- about 0.9 s a
+    time, and a quarter of the whole uncertainty path. None of it depends on the
+    caller's points.
+
+    Keyed per single variable, like :func:`variable_grids`, so a six-variable request
+    and a later one-variable request share the builds. Same lock discipline as the
+    rest of this module.
+    """
+    key = (_normalise(path), variable)
+    entry = _NN_UNC_CACHE.get(key)
+    if entry is not None:
+        return entry
+    with _LOCK:
+        entry = _NN_UNC_CACHE.get(key)
+        if entry is None:
+            entry = build()
+            _NN_UNC_CACHE[key] = entry
+    return entry
+
+
+def woa_salinity(path, build):
+    """Memoise the WOA salinity-climatology lookup used by salinity conditioning.
+
+    Keyed by the climatology file's real path (not the ESPER data directory -- the file
+    is supplied by the caller and lives wherever their source data does). ``build`` is
+    called with that path only on a miss. Same lock discipline as the rest of this
+    module; the build is a few seconds (nearest-neighbour fill of ~100 levels), paid
+    once per process rather than once per dask chunk.
+    """
+    key = os.path.realpath(path)
+    entry = _WOA_SALINITY_CACHE.get(key)
+    if entry is not None:
+        return entry
+    with _LOCK:
+        entry = _WOA_SALINITY_CACHE.get(key)
+        if entry is None:
+            entry = build(key)
+            _WOA_SALINITY_CACHE[key] = entry
     return entry
