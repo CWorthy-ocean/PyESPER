@@ -66,6 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from PyESPER.kernels import grid_cache
 
@@ -120,7 +121,7 @@ class SalinityConditioning:
     ta_endmember: float = DEFAULT_TA_ENDMEMBER
     dic_endmember: float = DEFAULT_DIC_ENDMEMBER
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for name in ("ta_endmember", "dic_endmember"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a non-negative number, got {getattr(self, name)!r}.")
@@ -140,11 +141,13 @@ class SalinityConditioning:
         # Normalise once so the cache key and any provenance string agree.
         object.__setattr__(self, "woa_salinity_path", os.path.realpath(path))
 
-    def climatology(self, lon, lat, depth) -> np.ndarray:
+    def climatology(self, lon: ArrayLike, lat: ArrayLike, depth: ArrayLike) -> np.ndarray:
         """WOA salinity at the points (lon °E any wrap, lat °N, depth m positive down)."""
         return woa_salinity_interpolant(self.woa_salinity_path)(lon, lat, depth)
 
-    def apply(self, salinity, lon, lat, depth) -> np.ndarray:
+    def apply(
+        self, salinity: ArrayLike, lon: ArrayLike, lat: ArrayLike, depth: ArrayLike
+    ) -> np.ndarray:
         """Conditioned salinity ``S'`` for the points (all 1-D arrays, same length)."""
         salinity = np.asarray(salinity, dtype="float64")
         w = raised_cosine_weight(salinity, self.low, self.high)
@@ -163,7 +166,13 @@ class SalinityConditioning:
         return out
 
 
-    def dilute_carbonate(self, variable, estimate, salinity, conditioned) -> np.ndarray:
+    def dilute_carbonate(
+        self,
+        variable: str,
+        estimate: ArrayLike,
+        salinity: ArrayLike,
+        conditioned: ArrayLike,
+    ) -> np.ndarray:
         """Move a TA/DIC estimate made at ``conditioned`` salinity to the model
         ``salinity`` along a conservative mixing line (see the module docstring).
 
@@ -176,7 +185,9 @@ class SalinityConditioning:
         return dilute_to_salinity(estimate, salinity, conditioned, endmember)
 
 
-def dilute_to_salinity(estimate, salinity, conditioned, endmember) -> np.ndarray:
+def dilute_to_salinity(
+    estimate: ArrayLike, salinity: ArrayLike, conditioned: ArrayLike, endmember: float
+) -> np.ndarray:
     """``endmember + (estimate - endmember) * salinity / conditioned`` where the two
     salinities differ; ``estimate`` itself elsewhere (and wherever ``conditioned`` is 0)."""
     estimate = np.asarray(estimate, dtype="float64")
@@ -189,7 +200,7 @@ def dilute_to_salinity(estimate, salinity, conditioned, endmember) -> np.ndarray
     return out
 
 
-def raised_cosine_weight(salinity, low, high) -> np.ndarray:
+def raised_cosine_weight(salinity: ArrayLike, low: float, high: float) -> np.ndarray:
     """Weight of the *model* salinity: 0 at/below ``low``, 1 at/above ``high``.
 
     ``0.5 - 0.5 cos(pi x)`` on the normalised band coordinate ``x`` (a Tukey taper): its
@@ -203,7 +214,9 @@ def raised_cosine_weight(salinity, low, high) -> np.ndarray:
 class _WOAInterpolant:
     """Trilinear lookup into the land-filled WOA salinity cube; lon wraps, depth clamps."""
 
-    def __init__(self, depth, lat, lon, values):
+    def __init__(
+        self, depth: np.ndarray, lat: np.ndarray, lon: np.ndarray, values: np.ndarray
+    ) -> None:
         from scipy.interpolate import RegularGridInterpolator
 
         # Pad longitude periodically so queries between the last and first column
@@ -218,7 +231,7 @@ class _WOAInterpolant:
             bounds_error=False, fill_value=None,
         )
 
-    def __call__(self, lon, lat, depth) -> np.ndarray:
+    def __call__(self, lon: ArrayLike, lat: ArrayLike, depth: ArrayLike) -> np.ndarray:
         lon = np.asarray(lon, dtype="float64")
         lon = self._lon_lo + np.mod(lon - self._lon_lo, 360.0)
         lat = np.clip(np.asarray(lat, dtype="float64"), self._lat_min, self._lat_max)
@@ -269,6 +282,6 @@ def _build_interpolant(path: str) -> _WOAInterpolant:
     return _WOAInterpolant(depth, lat, lon, values)
 
 
-def woa_salinity_interpolant(path) -> _WOAInterpolant:
+def woa_salinity_interpolant(path: str | os.PathLike) -> _WOAInterpolant:
     """The memoised lookup for ``path`` (built on first use, shared process-wide)."""
     return grid_cache.woa_salinity(path, lambda p: _build_interpolant(p))
