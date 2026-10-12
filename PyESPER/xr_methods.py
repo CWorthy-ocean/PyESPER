@@ -254,8 +254,9 @@ def _estimate_block(sal, temp, lon, lat, depth, dates, *, variables, path, metho
         }
         sal_in = sal_f[idx]
         if salinity_conditioning is not None:
-            # Only the salinity the nets see changes; the density/unit conversion a
-            # caller does afterwards is theirs to decide (roms-tools uses the same S').
+            # Only the salinity the nets see changes. The caller's unit conversion is
+            # its own business; roms-tools converts with the *model* salinity, which is
+            # right for TA/DIC once they are diluted back to it (see dilute_carbonate).
             sal_in = salinity_conditioning.apply(sal_in, lon_f[idx], lat_f[idx], depth_f[idx])
         preds = {
             "salinity": sal_in,
