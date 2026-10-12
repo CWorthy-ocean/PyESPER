@@ -5,7 +5,7 @@ with open("README.md", "r") as f:
 
 setup(
     name="PyESPER",
-    version="1.1.1",
+    version="1.2.0",
     description="Python version of ESPERv1",
     author="LMD",
     author_email="lmdias@uw.edu",
