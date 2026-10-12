@@ -110,9 +110,12 @@ observations below ~31 PSU. Fed a river-plume salinity the nets extrapolate unph
 `PyESPER.nn_xr` / `lir_xr` / `mixed_xr` can instead evaluate the nets at a raised-cosine
 blend of the model salinity toward the WOA23 annual-mean climatology below a band
 (default 31–34 PSU), and then dilute the TA/DIC estimates from that salinity back to the
-model salinity along a conservative mixing line (freshwater endmembers 770/850 µmol/kg by
-default, `ta_endmember`/`dic_endmember`), so alkalinity scales with salinity in a plume
-while the DIC/TA ratio the nets produced is kept. Above the band nothing changes. The climatology file is **not**
+model salinity along a conservative mixing line (freshwater endmember 770 µmol/kg for both
+by default, `ta_endmember`/`dic_endmember`), so alkalinity and DIC scale with salinity in a
+plume. The DIC/TA ratio is the nets' own at the conditioned salinity and tends to
+`dic_endmember/ta_endmember` (1 by default, approached from below) in fresh water; keep
+`dic_endmember <= ta_endmember` so DIC never crosses above TA. Above the band nothing
+changes. The climatology file is **not**
 downloaded by PyESPER — pass its path, and the error names the download URL if it is
 missing:
 

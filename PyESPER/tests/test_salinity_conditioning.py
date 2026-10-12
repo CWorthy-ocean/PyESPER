@@ -191,8 +191,27 @@ def test_nn_xr_dilutes_carbonate_to_the_model_salinity(woa_file):
     ta, dic, no3 = (out[v].values for v in ("TA", "DIC", "nitrate"))
     # S = 20 -> conditioned to clim, then diluted back to 20
     np.testing.assert_allclose(ta[0, 0], 770.0 + (2200.0 - 770.0) * 20.0 / clim)
-    np.testing.assert_allclose(dic[0, 0], 850.0 + (1900.0 - 850.0) * 20.0 / clim)
+    np.testing.assert_allclose(dic[0, 0], 770.0 + (1900.0 - 770.0) * 20.0 / clim)
     # S = 35.5 (above the band): untouched; nitrate never diluted; NaN stays NaN
     assert ta[1, 0] == 2200.0 and dic[1, 0] == 1900.0
     np.testing.assert_array_equal(no3[:, 0], [10.0, 10.0])
     assert np.isnan(ta[1, 1])
+
+
+def test_equal_default_endmembers_keep_dic_below_ta_down_to_fresh_water():
+    """DIC - TA after dilution is (DIC(S') - TA(S')) * S/S': same sign as the nets gave at
+    S', shrinking to 0 at S = 0. So with equal endmembers (the defaults) DIC/TA rises
+    toward 1 from below and never crosses it -- unlike the GLODAP-fit pair (770 / 850),
+    which put DIC above TA below ~8 PSU."""
+    assert DEFAULT_DIC_ENDMEMBER == DEFAULT_TA_ENDMEMBER
+    ta_c, dic_c, s_c = 2200.0, 1900.0, 31.5  # the nets at the conditioned salinity
+    sal = np.array([31.5, 20.0, 10.0, 5.0, 1.0, 0.1])
+    ta = dilute_to_salinity(np.full(6, ta_c), sal, np.full(6, s_c), DEFAULT_TA_ENDMEMBER)
+    dic = dilute_to_salinity(np.full(6, dic_c), sal, np.full(6, s_c), DEFAULT_DIC_ENDMEMBER)
+    ratio = dic / ta
+    assert ratio[0] == dic_c / ta_c
+    assert np.all(np.diff(ratio) > 0) and np.all(ratio < 1.0)
+    np.testing.assert_allclose(dic - ta, (dic_c - ta_c) * sal / s_c)
+    # The old unequal pair really did cross.
+    dic_old = dilute_to_salinity(np.full(6, dic_c), sal, np.full(6, s_c), 850.0)
+    assert (dic_old > ta)[-2:].all()

@@ -39,12 +39,21 @@ freshwater endmember::
     TA  = TA0  + (TA(S′)  - TA0)  S / S′
     DIC = DIC0 + (DIC(S′) - DIC0) S / S′
 
-with ``TA0``/``DIC0`` configurable (defaults 770 / 850 µmol/kg from the GLODAP fit).
-This preserves the DIC/TA ratio the nets produced where they have support -- hence the
-carbonate state (pCO2, pH) -- while letting both scale with salinity; on the 2014
-strips it lands within ~100 µmol/kg of the GLODAP line extrapolated to the plume.
+with ``TA0``/``DIC0`` configurable (both default to 770 µmol/kg, see
+:data:`DEFAULT_TA_ENDMEMBER`). What this does and does not preserve:
+
+* Above the band S == S′ and the dilution is the identity.
+* Inside and below the band the DIC/TA ratio is **not** the nets' ratio: it moves from
+  the nets' value at S′ toward ``DIC0/TA0`` as S → 0. With equal endmembers that limit
+  is exactly 1, approached from below -- ``DIC - TA = (DIC(S′) - TA(S′)) S/S′`` keeps
+  the sign the nets gave it at S′, so wherever the nets put DIC below TA (everywhere
+  they have support) the diluted pair never crosses. Unequal endmembers would cross:
+  with the GLODAP-fit intercepts (TA0 770, DIC0 850) DIC exceeded TA below ~8 PSU.
+* Both scale with salinity; on the 2014 strips the result lands within ~100 µmol/kg of
+  the GLODAP Bay of Bengal surface line extrapolated to the plume.
+
 Nutrients and oxygen are not diluted (their freshwater endmembers are nothing like
-conservative). Above the band S == S′ and the dilution is the identity.
+conservative).
 
 **The climatology file is not downloaded by this package.** Pass its path explicitly via
 :class:`SalinityConditioning`; if the file is missing the error names the download URL
@@ -80,13 +89,17 @@ WOA23_SALINITY_FILENAME = "woa23_decav_s00_01.nc"
 #: Variable name of the objectively analysed salinity in the WOA netCDF files.
 WOA_SALINITY_VARIABLE = "s_an"
 
-#: Default freshwater endmembers (µmol/kg) for diluting TA and DIC from the conditioned
-#: salinity to the model salinity: the intercepts of the GLODAPv2 surface TA-S and DIC-S
-#: fits in the Bay of Bengal (TA = 43.2 S + 768, DIC = 31.0 S + 855; 58 one-degree
-#: cells, S 31.4-35.2), close to the global surface TA-S intercept (~590). River
-#: chemistry varies (Amazon ~300, Ganges-Brahmaputra ~1700), so these are a middle value.
+#: Default freshwater endmember (µmol/kg) for diluting TA and DIC from the conditioned
+#: salinity to the model salinity. 770 is the intercept of the GLODAPv2 surface TA-S fit
+#: in the Bay of Bengal (TA = 43.2 S + 768; 58 one-degree cells, S 31.4-35.2), close to
+#: the global surface intercept (~590); river chemistry varies (Amazon ~300,
+#: Ganges-Brahmaputra ~1700), so it is a middle value. DIC deliberately takes the SAME
+#: endmember rather than its own fit intercept (855): the dilution keeps the sign of
+#: DIC - TA that the nets gave at S′, so equal endmembers guarantee DIC stays below TA
+#: all the way to fresh water, whereas DIC0 > TA0 made DIC exceed TA below ~8 PSU --
+#: the very defect the conditioning exists to remove.
 DEFAULT_TA_ENDMEMBER = 770.0
-DEFAULT_DIC_ENDMEMBER = 850.0
+DEFAULT_DIC_ENDMEMBER = DEFAULT_TA_ENDMEMBER
 
 #: ESPER variable names whose estimates are diluted to the model salinity.
 CARBONATE_VARIABLES = ("TA", "DIC")
@@ -117,6 +130,7 @@ class SalinityConditioning:
     high: float = DEFAULT_BAND[1]
     #: Freshwater endmembers (µmol/kg) for the conservative dilution of TA and DIC from
     #: the conditioned salinity back to the model salinity; see the module docstring.
+    #: Keep ``dic_endmember <= ta_endmember`` unless you want DIC above TA in fresh water.
     ta_endmember: float = DEFAULT_TA_ENDMEMBER
     dic_endmember: float = DEFAULT_DIC_ENDMEMBER
 
