@@ -8,11 +8,22 @@ This package is developed in parallel with [TRACE-Python](https://github.com/d-s
 
 ## Installation
 
-To install PyESPER, clone this repository and navigate to the PyESPER folder. It is recommended that you create a virtual environment and install all packages listed in the requirements.txt file. Open a terminal in the PyESPER directory and run
+This is [C]Worthy's fork of [LarissaMDias/PyESPER](https://github.com/LarissaMDias/PyESPER). It is
+not published to PyPI or conda (`pip install PyESPER` installs the upstream package, which has
+none of the fork's additions); install it from a clone, at a tagged version. Fork versions are
+`<upstream version>+cworthy.<n>` (a PEP 440 local version that sorts after the upstream release
+it builds on), with a matching git tag:
 
-`pip install PyESPER`
+```bash
+git clone --branch v1.1.1+cworthy.1 https://github.com/CWorthy-ocean/PyESPER
+cd PyESPER
+pip install -e .
+```
 
-to install the package and required dependencies listed in `requirements.txt`. *Note: Examples rely on the GLODAPv2.2023 dataset, which requires the separate `glodap` package.*
+Use a virtual environment if you like; the editable install brings in the dependencies from
+`setup.py` and, because the package stays in the clone, lets PyESPER find its data directories
+(`Mat_fullgrid/` and `NeuralNetworks/`) next to it. *Note: Examples rely on the GLODAPv2.2023
+dataset, which requires the separate `glodap` package.*
 
 ---
 
